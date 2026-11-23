@@ -1,0 +1,11 @@
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.exe
+debug.log
+rob-run.cfg
+imgui/
+build/
+.vs/
