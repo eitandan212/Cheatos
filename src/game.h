@@ -106,6 +106,10 @@ void  CancelTeleport();
 void  ApplyTeleport(bool steer);
 void  ReinforceTeleport();
 
+// -------- aim (memory path) --------
+bool  MemoryAim(const Vec3& worldTarget);
+void  ReinforceAim();
+
 // -------- gun --------
 struct GunToggles {
     bool noRecoil = false;

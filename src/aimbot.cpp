@@ -31,16 +31,16 @@ double NowSec() {
     return std::chrono::duration<double>(C::now().time_since_epoch()).count();
 }
 
-Vec3 LeadPoint(const Player& p, float dist) {
-    if (!g_cfg.predict || g_cfg.bulletSpeed < 1.0f) return p.head;
+Vec3 LeadPoint(const Player& p, const Vec3& base, float dist) {
+    if (!g_cfg.predict || g_cfg.bulletSpeed < 1.0f) return base;
     auto& v = g_vel[p.entityId];
     double now = NowSec();
     if (!v.have) {
         v.pos = p.root; v.vel = Vec3(); v.t = now; v.have = true;
-        return p.head;
+        return base;
     }
     double dt = now - v.t;
-    if (dt < 0.001) return p.head;
+    if (dt < 0.001) return base;
     Vec3 inst = Vec3((p.root.x - v.pos.x) / (float)dt,
                      (p.root.y - v.pos.y) / (float)dt,
                      (p.root.z - v.pos.z) / (float)dt);
@@ -50,9 +50,9 @@ Vec3 LeadPoint(const Player& p, float dist) {
     v.pos = p.root;
     v.t = now;
     float lead = dist / g_cfg.bulletSpeed;
-    return Vec3(p.head.x + v.vel.x * lead,
-                p.head.y + v.vel.y * lead,
-                p.head.z + v.vel.z * lead);
+    return Vec3(base.x + v.vel.x * lead,
+                base.y + v.vel.y * lead,
+                base.z + v.vel.z * lead);
 }
 
 Vec3 AimPoint(const Player& p) {
@@ -99,9 +99,8 @@ void SendMouse(float dx, float dy) {
     Game::ReportAimMove((float)ix, (float)iy);
 }
 
-bool MemoryAim(const Vec3& /*target*/) {
-    // placeholder for direct camera-write path; falls through to mouse
-    return false;
+bool MemoryAim(const Vec3& target) {
+    return Game::MemoryAim(target);
 }
 
 } // namespace
@@ -135,7 +134,7 @@ void Aimbot::Update() {
         if (p.distance > g_cfg.maxDistance) continue;
 
         Vec3 aim = AimPoint(p);
-        aim = LeadPoint(p, p.distance);
+        aim = LeadPoint(p, aim, p.distance);
 
         float s[2];
         if (!Game::WorldToScreen(aim, s)) continue;

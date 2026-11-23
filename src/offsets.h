@@ -230,16 +230,10 @@ struct TypeInfoSet {
     uintptr_t weapon_inertia_data;
 };
 
-constexpr TypeInfoSet type_info_sets[3] = {
-    { 0x03B91A48, 0x03B91A50, 0x03B91A58, 0x03B91A60, 0x03B91A68,
-      0x03B91A70, 0x03B91A78, 0x03B91A80, 0x03B91A88, 0x03B91A90,
-      0x03B91A98, 0x03B91AA0, 0x03B91AA8, 0x03B91AB0, 0x03B91AB8, 0x03B91AC0 },
-    { 0x03C01A48, 0x03C01A50, 0x03C01A58, 0x03C01A60, 0x03C01A68,
-      0x03C01A70, 0x03C01A78, 0x03C01A80, 0x03C01A88, 0x03C01A90,
-      0x03C01A98, 0x03C01AA0, 0x03C01AA8, 0x03C01AB0, 0x03C01AB8, 0x03C01AC0 },
-    { 0x03D01A48, 0x03D01A50, 0x03D01A58, 0x03D01A60, 0x03D01A68,
-      0x03D01A70, 0x03D01A78, 0x03D01A80, 0x03D01A88, 0x03D01A90,
-      0x03D01A98, 0x03D01AA0, 0x03D01AA8, 0x03D01AB0, 0x03D01AB8, 0x03D01AC0 },
+// Populate with real RVAs dumped from the current ROB RUN build to shortcut
+// klass resolution; empty by default so ScanKlassNames carries the load.
+constexpr TypeInfoSet type_info_sets[1] = {
+    { 0 }
 };
 
 // GameObjectManager (UnityPlayer.dll RVA)

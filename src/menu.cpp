@@ -195,11 +195,8 @@ void Menu::Render() {
         }
     }
     ImGui::End();
-    // click-through follows cursor over menu
-    POINT pt; GetCursorPos(&pt);
-    ScreenToClient(Overlay::Hwnd(), &pt);
-    bool over = pt.x >= 120 && pt.y >= 120 && pt.x <= 640 && pt.y <= 680;
-    Overlay::SetClickThrough(!over);
+    // click-through follows what ImGui is actually under
+    Overlay::SetClickThrough(!ImGui::GetIO().WantCaptureMouse);
 }
 
 void Menu::SaveConfig() {

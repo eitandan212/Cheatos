@@ -194,19 +194,26 @@ bool Overlay::BeginFrame() {
         DispatchMessageW(&msg);
         if (msg.message == WM_QUIT) return false;
     }
-    LARGE_INTEGER now;
-    QueryPerformanceCounter(&now);
-    double elapsed = (double)(now.QuadPart - g_last.QuadPart) / (double)g_freq.QuadPart;
-    const double target = 1.0 / 90.0;
-    if (elapsed < target) {
-        Sleep(0);
-        return false;
-    }
-    g_last = now;
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
     return true;
+}
+
+static void PaceTo(double targetHz) {
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    double elapsed = (double)(now.QuadPart - g_last.QuadPart) / (double)g_freq.QuadPart;
+    double target = 1.0 / targetHz;
+    if (elapsed < target) {
+        double remaining = target - elapsed;
+        if (remaining > 0.004) Sleep((DWORD)((remaining - 0.002) * 1000.0));
+        do {
+            QueryPerformanceCounter(&now);
+            elapsed = (double)(now.QuadPart - g_last.QuadPart) / (double)g_freq.QuadPart;
+        } while (elapsed < target);
+    }
+    g_last = now;
 }
 
 void Overlay::EndFrame() {
@@ -233,6 +240,7 @@ void Overlay::EndFrame() {
     SIZE  sz  { g_w, g_h };
     BLENDFUNCTION bf{ AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
     UpdateLayeredWindow(g_hwnd, nullptr, nullptr, &sz, g_memDc, &ptSrc, 0, &bf, ULW_ALPHA);
+    PaceTo(144.0);
 }
 
 void Overlay::MatchWindow(HWND game) {

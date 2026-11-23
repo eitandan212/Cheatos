@@ -87,11 +87,12 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 
         Game::Update();
 
-        if (!Overlay::BeginFrame()) { Sleep(1); continue; }
+        if (!Overlay::BeginFrame()) break;  // WM_QUIT only
         ESP::Render();
         if (!Menu::IsOpen()) Aimbot::Update();
         Menu::Render();
         Game::ReinforceTeleport();
+        Game::ReinforceAim();
         Overlay::EndFrame();
     }
 

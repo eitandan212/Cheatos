@@ -1,4 +1,5 @@
 #include "esp.h"
+#include "aimbot.h"
 #include "game.h"
 #include "overlay.h"
 #include "portrait.h"
@@ -245,6 +246,13 @@ void ESP::Render() {
 
     if (g_cfg.watermark)  DrawWatermark(dl);
     if (g_cfg.crosshair)  DrawCrosshair(dl);
+
+    auto& aim = Aimbot::Cfg();
+    if (aim.enabled && aim.drawFov) {
+        float cx = (float)Overlay::Width() * 0.5f;
+        float cy = (float)Overlay::Height() * 0.5f;
+        dl->AddCircle(ImVec2(cx, cy), aim.fov, IM_COL32(255, 60, 60, 160), 64, 1.0f);
+    }
 
     int vis = 0, far_ = 0;
     for (auto& p : players) {

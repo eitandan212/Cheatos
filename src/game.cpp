@@ -87,6 +87,17 @@ struct TpState {
 };
 TpState g_tp;
 
+// per-entity view-updater lookup (entity_id -> native view pointer)
+std::unordered_map<uint32_t, uintptr_t> g_viewForEntity;
+
+// memory-aim state
+struct AimState {
+    bool  active = false;
+    Vec3  target;
+    double untilSec = 0.0;
+};
+AimState g_aim;
+
 // recoil/spread/sway pin-restore
 std::unordered_map<uintptr_t, uint32_t> g_pinRestore;
 Game::GunToggles                        g_gunState;
@@ -230,9 +241,19 @@ void ScanKlassNames(const std::vector<std::string>& wanted,
     out.clear();
     HANDLE h = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, Mem::Pid());
     if (!h) return;
+    auto t0 = Clock::now();
+    const auto budget = std::chrono::milliseconds(2500);
     MEMORY_BASIC_INFORMATION mbi;
+    // start at arena low but fall through to the whole private range if arena is empty
     uintptr_t addr = offsets::klass_arena_lo;
-    while (addr < offsets::klass_arena_hi && out.size() < wanted.size()) {
+    uintptr_t hi   = offsets::klass_arena_hi;
+    int phase = 0;
+    while (out.size() < wanted.size()) {
+        if (Clock::now() - t0 > budget) break;
+        if (addr >= hi) {
+            if (phase++ == 0) { addr = 0x10000; hi = 0x7FFFFFFFFFFFULL; }
+            else break;
+        }
         if (!VirtualQueryEx(h, (LPCVOID)addr, &mbi, sizeof(mbi))) break;
         if (mbi.State == MEM_COMMIT && !(mbi.Protect & PAGE_NOACCESS) &&
             !(mbi.Protect & PAGE_GUARD) && (mbi.Type & MEM_PRIVATE)) {
@@ -258,8 +279,9 @@ void ScanKlassNames(const std::vector<std::string>& wanted,
                 }
             }
         }
-        addr = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
-        if (addr <= (uintptr_t)mbi.BaseAddress) break;
+        uintptr_t next = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+        if (next <= addr) break;
+        addr = next;
     }
     CloseHandle(h);
 }
@@ -408,15 +430,21 @@ bool TryHeapScan() {
     if (!g_k.battleEntitiesModel) return false;
     HANDLE h = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, Mem::Pid());
     if (!h) return false;
+    auto t0 = Clock::now();
+    const auto budget = std::chrono::milliseconds(1500);
     MEMORY_BASIC_INFORMATION mbi;
     uintptr_t addr = 0x10000;
     bool found = false;
+    size_t bytesSwept = 0;
     while (!found && addr < 0x7FFFFFFFFFFFULL) {
+        if (Clock::now() - t0 > budget) break;
+        if (bytesSwept > (size_t)1 << 30) break;              // 1 GiB hard cap per pass
         if (!VirtualQueryEx(h, (LPCVOID)addr, &mbi, sizeof(mbi))) break;
         if (mbi.State == MEM_COMMIT && (mbi.Type & MEM_PRIVATE) &&
             !(mbi.Protect & PAGE_NOACCESS) && !(mbi.Protect & PAGE_GUARD)) {
             size_t sz = (size_t)mbi.RegionSize;
-            if (sz > 0x200000) sz = 0x200000;
+            if (sz > 0x100000) sz = 0x100000;                 // 1 MiB per region
+            bytesSwept += sz;
             std::vector<uintptr_t> buf(sz / sizeof(uintptr_t));
             SIZE_T got = 0;
             if (ReadProcessMemory(h, mbi.BaseAddress, buf.data(), sz, &got)) {
@@ -446,14 +474,20 @@ void FindViewUpdater() {
     if (!g_k.aimTargetUpdater) return;
     HANDLE h = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, Mem::Pid());
     if (!h) return;
+    auto t0 = Clock::now();
+    const auto budget = std::chrono::milliseconds(1500);
+    size_t bytesSwept = 0;
     MEMORY_BASIC_INFORMATION mbi;
     uintptr_t addr = 0x10000;
     while ((!g_viewUpdater || !g_cineBrain) && addr < 0x7FFFFFFFFFFFULL) {
+        if (Clock::now() - t0 > budget) break;
+        if (bytesSwept > (size_t)1 << 30) break;
         if (!VirtualQueryEx(h, (LPCVOID)addr, &mbi, sizeof(mbi))) break;
         if (mbi.State == MEM_COMMIT && (mbi.Type & MEM_PRIVATE) &&
             !(mbi.Protect & PAGE_NOACCESS) && !(mbi.Protect & PAGE_GUARD)) {
             size_t sz = (size_t)mbi.RegionSize;
-            if (sz > 0x200000) sz = 0x200000;
+            if (sz > 0x100000) sz = 0x100000;
+            bytesSwept += sz;
             std::vector<uintptr_t> buf(sz / sizeof(uintptr_t));
             SIZE_T got = 0;
             if (ReadProcessMemory(h, mbi.BaseAddress, buf.data(), sz, &got)) {
@@ -756,28 +790,49 @@ const char* kJointNames[16] = {
     "L_leg_2_jnt","R_leg_2_jnt","L_foot_1_jnt","R_foot_1_jnt",
 };
 
-void FillRig(uintptr_t view, BoneRig& rig, Vec3 root) {
-    rig.filled = false;
-    for (auto& j : rig.joints) j = root;
-    if (!Mem::IsValidPtr(view)) return;
+bool ReadViewHead(uintptr_t view, Vec3& out) {
+    if (!Mem::IsValidPtr(view)) return false;
+    // path 1: head_position transform
     uintptr_t headT = Mem::ReadPtr(view + offsets::char_view::head_position);
     if (Mem::IsValidPtr(headT)) {
         Vec3 h = WorldFromTransform(headT);
-        if (InWorld(h)) rig.joints[3] = h;
+        if (InWorld(h)) { out = h; return true; }
     }
-    // without a managed bone map we fall back to synthesized heights anchored at root
-    rig.joints[0]  = Vec3(root.x, root.y + 0.9f,  root.z);
-    rig.joints[1]  = Vec3(root.x, root.y + 1.35f, root.z);
-    rig.joints[2]  = Vec3(root.x, root.y + 1.50f, root.z);
-    if (rig.joints[3].y < root.y + 1.0f) rig.joints[3] = Vec3(root.x, root.y + offsets::skeleton::head_height, root.z);
-    rig.joints[4]  = Vec3(root.x - 0.20f, root.y + 1.40f, root.z);
-    rig.joints[5]  = Vec3(root.x + 0.20f, root.y + 1.40f, root.z);
-    rig.joints[6]  = Vec3(root.x - 0.30f, root.y + 1.15f, root.z);
-    rig.joints[7]  = Vec3(root.x + 0.30f, root.y + 1.15f, root.z);
-    rig.joints[8]  = Vec3(root.x - 0.32f, root.y + 0.95f, root.z);
-    rig.joints[9]  = Vec3(root.x + 0.32f, root.y + 0.95f, root.z);
-    rig.joints[10] = Vec3(root.x - 0.12f, root.y + 0.85f, root.z);
-    rig.joints[11] = Vec3(root.x + 0.12f, root.y + 0.85f, root.z);
+    // path 2: head_behavior -> bone_target transform
+    uintptr_t behavior = Mem::ReadPtr(view + offsets::char_view::head_behavior);
+    if (Mem::IsValidPtr(behavior)) {
+        uintptr_t bone = Mem::ReadPtr(behavior + offsets::char_view::bone_target);
+        if (Mem::IsValidPtr(bone)) {
+            Vec3 h = WorldFromTransform(bone);
+            if (InWorld(h)) { out = h; return true; }
+        }
+    }
+    return false;
+}
+
+void FillRig(uintptr_t view, BoneRig& rig, Vec3 root) {
+    rig.filled = false;
+    for (auto& j : rig.joints) j = root;
+    Vec3 liveHead;
+    bool haveHead = ReadViewHead(view, liveHead);
+    if (haveHead) rig.joints[3] = liveHead;
+    else          rig.joints[3] = Vec3(root.x, root.y + offsets::skeleton::head_height, root.z);
+    // anchor the rest to root + measured head so proportions follow the real height
+    float torsoY = root.y + (haveHead ? (rig.joints[3].y - root.y) * 0.82f : 1.35f);
+    float pelvisY= root.y + (haveHead ? (rig.joints[3].y - root.y) * 0.55f : 0.90f);
+    rig.joints[1]  = Vec3(root.x, torsoY, root.z);
+    rig.joints[2]  = Vec3(root.x, rig.joints[3].y - 0.10f, root.z);
+    float shoulderY = torsoY;
+    float elbowY    = torsoY - 0.25f;
+    float handY     = torsoY - 0.45f;
+    rig.joints[4]  = Vec3(root.x - 0.20f, shoulderY, root.z);
+    rig.joints[5]  = Vec3(root.x + 0.20f, shoulderY, root.z);
+    rig.joints[6]  = Vec3(root.x - 0.30f, elbowY,    root.z);
+    rig.joints[7]  = Vec3(root.x + 0.30f, elbowY,    root.z);
+    rig.joints[8]  = Vec3(root.x - 0.32f, handY,     root.z);
+    rig.joints[9]  = Vec3(root.x + 0.32f, handY,     root.z);
+    rig.joints[10] = Vec3(root.x - 0.12f, pelvisY - 0.05f, root.z);
+    rig.joints[11] = Vec3(root.x + 0.12f, pelvisY - 0.05f, root.z);
     rig.joints[12] = Vec3(root.x - 0.14f, root.y + 0.45f, root.z);
     rig.joints[13] = Vec3(root.x + 0.14f, root.y + 0.45f, root.z);
     rig.joints[14] = Vec3(root.x - 0.14f, root.y + 0.02f, root.z);
@@ -893,7 +948,14 @@ void BuildPlayer(int32_t entityId, uintptr_t model, bool isLocal,
         p.name = buf;
     }
 
-    FillRig(0, p.rig, root);
+    uintptr_t view = 0;
+    if (auto it = g_viewForEntity.find((uint32_t)entityId); it != g_viewForEntity.end())
+        view = it->second;
+    FillRig(view, p.rig, root);
+    if (view) {
+        Vec3 h;
+        if (ReadViewHead(view, h)) p.head = h;
+    }
     p.hasRig = p.rig.filled;
 
     Cam c = GetCameraForUse();
@@ -903,9 +965,20 @@ void BuildPlayer(int32_t entityId, uintptr_t model, bool isLocal,
     out.push_back(std::move(p));
 }
 
+void RebuildViewMap() {
+    g_viewForEntity.clear();
+    if (!g_viewUpdater) return;
+    uintptr_t dict = Mem::ReadPtr(g_viewUpdater + offsets::entities_updater::view_dict);
+    std::vector<std::pair<int32_t, uintptr_t>> entries;
+    IterateDict(dict, entries);
+    for (auto& e : entries) g_viewForEntity[(uint32_t)e.first] = e.second;
+}
+
 void GatherCharacters(std::vector<Player>& out) {
     out.clear();
     if (!g_battleEntities) return;
+
+    RebuildViewMap();
 
     std::unordered_map<int32_t, std::pair<std::string, std::string>> slots;
     CollectSlotNames(slots);
@@ -1378,4 +1451,45 @@ void Game::ScaleAimMove(float& mx, float& my) {
 float Game::Distance3D(const Vec3& a, const Vec3& b) {
     float dx = a.x-b.x, dy = a.y-b.y, dz = a.z-b.z;
     return std::sqrt(dx*dx + dy*dy + dz*dz);
+}
+
+static bool WriteCameraBasisTo(const Vec3& target) {
+    if (!g_battleModel) return false;
+    uintptr_t cam = Mem::ReadPtr(g_battleModel + offsets::battle_model::camera);
+    if (!Mem::IsValidPtr(cam)) return false;
+    Vec3 pos = ReadVec3(cam + offsets::battle_camera_model::position);
+    if (!InWorld(pos)) return false;
+    Vec3 fwd = Normalize(Sub(target, pos));
+    Vec3 worldUp(0, 1, 0);
+    Vec3 right;
+    // right = normalize(cross(worldUp, fwd))
+    right.x = worldUp.y * fwd.z - worldUp.z * fwd.y;
+    right.y = worldUp.z * fwd.x - worldUp.x * fwd.z;
+    right.z = worldUp.x * fwd.y - worldUp.y * fwd.x;
+    if (Length(right) < 1e-4f) right = Vec3(1, 0, 0);
+    right = Normalize(right);
+    Vec3 up;
+    up.x = fwd.y * right.z - fwd.z * right.y;
+    up.y = fwd.z * right.x - fwd.x * right.z;
+    up.z = fwd.x * right.y - fwd.y * right.x;
+    up = Normalize(up);
+    bool ok = true;
+    ok &= Mem::WriteRaw(Mem::Pid(), cam + offsets::battle_camera_model::forward, &fwd,   sizeof(fwd));
+    ok &= Mem::WriteRaw(Mem::Pid(), cam + offsets::battle_camera_model::right,   &right, sizeof(right));
+    ok &= Mem::WriteRaw(Mem::Pid(), cam + offsets::battle_camera_model::up,      &up,    sizeof(up));
+    return ok;
+}
+
+bool Game::MemoryAim(const Vec3& worldTarget) {
+    g_aim.active   = true;
+    g_aim.target   = worldTarget;
+    g_aim.untilSec = std::chrono::duration<double>(Clock::now().time_since_epoch()).count() + 0.08;
+    return WriteCameraBasisTo(worldTarget);
+}
+
+void Game::ReinforceAim() {
+    if (!g_aim.active) return;
+    double now = std::chrono::duration<double>(Clock::now().time_since_epoch()).count();
+    if (now > g_aim.untilSec) { g_aim.active = false; return; }
+    WriteCameraBasisTo(g_aim.target);
 }
