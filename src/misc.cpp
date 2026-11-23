@@ -2,6 +2,7 @@
 // no name stealer, no chat spammer, no hitsound (no outgoing-hit event).
 #include "misc.h"
 #include "game.h"
+#include "events.h"
 
 #include <windows.h>
 #include <chrono>
@@ -98,6 +99,34 @@ void StepFov() {
     Game::WriteCameraFov(g_cfg.fovDeg);
 }
 
+int g_lastSlotState[4][2] = {}; // {save, recall}
+
+void StepSavedSlots() {
+    for (int i = 0; i < 4; ++i) {
+        int saveVk   = g_cfg.slotKeys[i].saveVk;
+        int recallVk = g_cfg.slotKeys[i].recallVk;
+        int saveNow   = saveVk   && (GetAsyncKeyState(saveVk)   & 0x8000) ? 1 : 0;
+        int recallNow = recallVk && (GetAsyncKeyState(recallVk) & 0x8000) ? 1 : 0;
+        if (saveNow && !g_lastSlotState[i][0]) {
+            Vec3 pos;
+            if (Game::LocalPlayerRoot(pos)) {
+                g_cfg.slotHave[i] = true;
+                g_cfg.slotPos[i][0] = pos.x;
+                g_cfg.slotPos[i][1] = pos.y;
+                g_cfg.slotPos[i][2] = pos.z;
+                Events::Push(Events::Kind::Teleport, "slot %d saved", i + 1);
+            }
+        }
+        if (recallNow && !g_lastSlotState[i][1] && g_cfg.slotHave[i]) {
+            Vec3 pt(g_cfg.slotPos[i][0], g_cfg.slotPos[i][1], g_cfg.slotPos[i][2]);
+            Game::BeginTeleport(Game::TpKind::ToPoint, 0, pt, false);
+            Events::Push(Events::Kind::Teleport, "slot %d recall", i + 1);
+        }
+        g_lastSlotState[i][0] = saveNow;
+        g_lastSlotState[i][1] = recallNow;
+    }
+}
+
 } // namespace
 
 Misc::Settings& Misc::Cfg() { return g_cfg; }
@@ -109,4 +138,5 @@ void Misc::Update() {
     StepAirstuck();
     StepThirdPerson();
     StepFov();
+    StepSavedSlots();
 }

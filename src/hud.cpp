@@ -5,11 +5,14 @@
 #include "misc.h"
 #include "game.h"
 #include "overlay.h"
+#include "events.h"
 
 #include "../imgui/imgui.h"
 #include <chrono>
 #include <cstdio>
 #include <vector>
+#include <cmath>
+#include <algorithm>
 
 namespace {
 
@@ -135,6 +138,22 @@ void DrawTargetInfoCard(ImDrawList* dl) {
         dl->AddText(ImVec2(x + 10, y + 56), kAccH, tgt->role.c_str());
     if (!tgt->heldItem.empty())
         dl->AddText(ImVec2(x + 10 + 70, y + 56), kTextLo, tgt->heldItem.c_str());
+
+    // hit chance estimate: inverse of (distance / effective FOV) * smoothing
+    float d = std::max(1.0f, tgt->distance);
+    float fovBonus = std::min(1.0f, (float)Aimbot::Cfg().fov / std::max(1.0f, best));
+    float smoothPenalty = 1.0f / std::max(1.0f, Aimbot::Cfg().smooth * 0.5f);
+    float chance = std::clamp(fovBonus * smoothPenalty * (200.0f / d), 0.0f, 1.0f);
+    char cb[48]; std::snprintf(cb, 48, "chance %d%%", (int)(chance * 100.0f));
+    ImU32 cc = chance > 0.66f ? IM_COL32(0x55, 0xE3, 0x9A, 255)
+             : chance > 0.33f ? IM_COL32(0xFF, 0xC2, 0x66, 255)
+             :                  IM_COL32(0xE3, 0x4D, 0x5C, 255);
+    dl->AddText(ImVec2(x + 10, y + 72), cc, cb);
+    // chance bar
+    dl->AddRectFilled(ImVec2(x + 110, y + 74), ImVec2(x + 110 + 90, y + 82),
+                      IM_COL32(0, 0, 0, 180), 2.0f);
+    dl->AddRectFilled(ImVec2(x + 110, y + 74), ImVec2(x + 110 + 90 * chance, y + 82),
+                      cc, 2.0f);
 }
 
 } // namespace
@@ -150,9 +169,83 @@ void Hud::TickFps() {
     }
 }
 
+void DrawEventLog(ImDrawList* dl) {
+    auto& st = AppState::Cfg();
+    if (!st.showIndicatorPanel || st.streamerMode) return;
+    const auto& ring = Events::Snapshot();
+    if (ring.empty()) return;
+
+    double now = NowSec();
+    const float panelW = 280.0f;
+    const float lineH  = 16.0f;
+    int shown = 0;
+    float yStart = 80.0f;
+    float x = (float)Overlay::Width() - panelW - 14.0f;
+
+    // Count visible (younger than 8 s)
+    for (auto it = ring.rbegin(); it != ring.rend(); ++it) {
+        if (now - it->t > 8.0) break;
+        if (++shown >= 6) break;
+    }
+    if (!shown) return;
+    float panelH = shown * lineH + 12.0f;
+    dl->AddRectFilled(ImVec2(x, yStart), ImVec2(x + panelW, yStart + panelH), kPanel, 6.0f);
+    dl->AddRect      (ImVec2(x, yStart), ImVec2(x + panelW, yStart + panelH), kBorder, 6.0f, 0, 1.0f);
+    int i = 0;
+    for (auto it = ring.rbegin(); it != ring.rend() && i < shown; ++it, ++i) {
+        float age = (float)(now - it->t);
+        if (age > 8.0f) break;
+        float fade = 1.0f - (age / 8.0f);
+        ImU32 tint = kAccent;
+        switch (it->kind) {
+            case Events::Kind::Aim:     tint = kAccent; break;
+            case Events::Kind::Trigger: tint = kAccH;   break;
+            case Events::Kind::Teleport:tint = IM_COL32(0xFF,0xC2,0x66,0xFF); break;
+            case Events::Kind::Warn:    tint = kBad;    break;
+            case Events::Kind::Config:  tint = kTextLo; break;
+            default: break;
+        }
+        ImU32 col = (ImU32)((((uint32_t)(fade * 255.0f)) << 24) | (tint & 0x00FFFFFF));
+        dl->AddText(ImVec2(x + 10, yStart + 6 + i * lineH), col, it->text.c_str());
+    }
+}
+
+void DrawToolbar(ImDrawList* dl) {
+    auto& st = AppState::Cfg();
+    if (st.streamerMode) return;
+    struct Btn { const char* label; bool active; };
+    Btn btns[] = {
+        { "AIM",   Aimbot::Cfg().mode != Aimbot::Mode::Off },
+        { "TRG",   Aimbot::TrigCfg().enabled               },
+        { "ESP",   ESP::Cfg().enabled                      },
+        { "RDR",   ESP::Cfg().radar                        },
+        { "3P",    Misc::Cfg().thirdPerson                 },
+        { "BHOP",  Misc::Cfg().bhop                        },
+    };
+    const int n = (int)(sizeof(btns)/sizeof(btns[0]));
+    const float w = 46.0f, h = 24.0f, gap = 6.0f;
+    float total = n * w + (n - 1) * gap + 20.0f;
+    float x = (float)Overlay::Width() * 0.5f - total * 0.5f;
+    float y = 12.0f;
+    dl->AddRectFilled(ImVec2(x, y), ImVec2(x + total, y + h + 8.0f), kPanel, 8.0f);
+    dl->AddRect      (ImVec2(x, y), ImVec2(x + total, y + h + 8.0f), kBorder, 8.0f, 0, 1.0f);
+    for (int i = 0; i < n; ++i) {
+        float bx = x + 10 + i * (w + gap);
+        ImU32 bg = btns[i].active ? IM_COL32(32, 72, 70, 255) : IM_COL32(26, 31, 39, 255);
+        ImU32 fg = btns[i].active ? kAccH : kTextLo;
+        dl->AddRectFilled(ImVec2(bx, y + 4), ImVec2(bx + w, y + 4 + h), bg, 5.0f);
+        if (btns[i].active)
+            dl->AddRectFilled(ImVec2(bx, y + 4 + h - 2), ImVec2(bx + w, y + 4 + h), kAccent, 2.0f);
+        ImVec2 sz = ImGui::CalcTextSize(btns[i].label);
+        dl->AddText(ImVec2(bx + (w - sz.x) * 0.5f, y + 4 + (h - sz.y) * 0.5f), fg, btns[i].label);
+    }
+}
+
 void Hud::Render() {
     ImDrawList* dl = ImGui::GetForegroundDrawList();
     DrawIndicatorPanel(dl);
     DrawFps(dl);
     DrawTargetInfoCard(dl);
+    DrawEventLog(dl);
+    DrawToolbar(dl);
 }

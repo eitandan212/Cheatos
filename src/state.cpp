@@ -1,4 +1,5 @@
 #include "state.h"
+#include "events.h"
 
 #include <algorithm>
 #include <cstring>
@@ -30,11 +31,14 @@ State& AppState::Cfg() { return g_state; }
 
 void AppState::PollPanic() {
     // Panic toggles live even in Off mode via its own Toggle keybind.
-    if (g_state.panic.mode == KeyMode::Off) return;
-    bool v = g_state.panic.Active();
-    // In Toggle mode the Active() call already flipped _toggleState on
-    // the rising edge; mirror it. In Hold mode it follows the key.
-    g_state.panicActive = v;
+    if (g_state.panic.mode == KeyMode::Off) {
+        if (g_state.panicActive) { g_state.panicActive = false; Events::Push(Events::Kind::Warn, "panic disabled"); }
+        return;
+    }
+    bool prev = g_state.panicActive;
+    g_state.panicActive = g_state.panic.Active();
+    if (g_state.panicActive != prev)
+        Events::Push(Events::Kind::Warn, g_state.panicActive ? "PANIC ON" : "panic off");
 }
 
 bool AppState::IsWatched(const std::string& name, const std::string& clan) {

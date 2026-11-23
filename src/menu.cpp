@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <cstring>
 #include <vector>
+#include <string>
 #include <algorithm>
 
 namespace {
@@ -34,6 +35,15 @@ struct SavedBlob {
 
 int  g_activeProfile = 0;
 char g_profileNames[3][16] = { "A", "B", "C" };
+char g_search[64]    = "";
+
+bool TitleMatchesFilter(const char* title) {
+    if (!g_search[0]) return true;
+    std::string t = title, n = g_search;
+    std::transform(t.begin(), t.end(), t.begin(), ::tolower);
+    std::transform(n.begin(), n.end(), n.begin(), ::tolower);
+    return t.find(n) != std::string::npos;
+}
 
 const char* VkName(int vk) {
     static char buf[32];
@@ -129,8 +139,13 @@ void BeginCard(const char* title) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14, 14));
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 8.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
-    ImGui::BeginChild(title, ImVec2(0, 0), true,
+    bool show = TitleMatchesFilter(title);
+    ImGui::BeginChild(title, ImVec2(0, show ? 0.0f : 0.0f), show,
         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_AlwaysAutoResize);
+    if (!show) {
+        ImGui::GetCurrentWindow()->SkipItems = true;
+        return;
+    }
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 p = ImGui::GetCursorScreenPos();
     dl->AddRectFilled(ImVec2(p.x, p.y), ImVec2(p.x + 3, p.y + 16), kAccent, 2.0f);
@@ -317,10 +332,26 @@ void SecVisuals() {
 
     BeginCard("HUD");
     ImGui::Checkbox("Watermark",          &c.watermark);
-    ImGui::Checkbox("Radar",              &c.radar);
-    ImGui::Checkbox("Radar loot",         &c.radarLoot);
-    ImGui::SliderFloat("Radar size",      &c.radarSize, 100.0f, 400.0f);
-    ImGui::SliderFloat("Radar range",     &c.radarRange, 50.0f, 800.0f);
+    EndCard();
+
+    BeginCard("RADAR");
+    ImGui::Checkbox("Enabled",            &c.radar);
+    ImGui::Checkbox("Show loot",          &c.radarLoot);
+    const char* locks[] = { "Camera yaw", "World north" };
+    int rl = (int)c.radarLock;
+    if (ImGui::Combo("Lock", &rl, locks, 2)) c.radarLock = (ESP::RadarLock)rl;
+    ImGui::SliderFloat("Size",            &c.radarSize, 100.0f, 400.0f);
+    ImGui::SliderFloat("Range",           &c.radarRange, 50.0f, 800.0f);
+    EndCard();
+
+    BeginCard("OFFSCREEN");
+    ImGui::Checkbox("Edge chevrons",      &c.offscreenChevron);
+    EndCard();
+
+    BeginCard("BOX STYLE");
+    const char* bs[] = { "Corner", "Full 2D", "Rounded", "Edgeless" };
+    int bsi = (int)c.boxStyle;
+    if (ImGui::Combo("Style", &bsi, bs, 4)) c.boxStyle = (ESP::BoxStyle)bsi;
     EndCard();
 }
 
@@ -410,6 +441,21 @@ void SecMisc() {
     ImGui::Separator();
     ImGui::Checkbox("FOV override",       &m.fovOverride);
     ImGui::SliderFloat("FOV",             &m.fovDeg, 40.0f, 140.0f);
+    EndCard();
+
+    BeginCard("SAVED TELEPORTS");
+    for (int i = 0; i < 4; ++i) {
+        ImGui::PushID(30000 + i);
+        char label[32];
+        std::snprintf(label, 32, "slot %d %s", i + 1, m.slotHave[i] ? "[set]" : "[empty]");
+        ImGui::TextUnformatted(label);
+        ImGui::SameLine(120);
+        static bool savePend[4] = {}, recallPend[4] = {};
+        BindButton("save key",   &m.slotKeys[i].saveVk,   &savePend[i]);
+        ImGui::SameLine();
+        BindButton("recall key", &m.slotKeys[i].recallVk, &recallPend[i]);
+        ImGui::PopID();
+    }
     EndCard();
 
     BeginCard("GUN MODS");
@@ -672,6 +718,18 @@ void Menu::Render() {
         ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar))
     {
         DrawTitleBar();
+
+        // Search strip — fast card filter
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImGui::ColorConvertU32ToFloat4(kPanelHi));
+        ImGui::SetNextItemWidth(260);
+        ImGui::InputTextWithHint("##search", "filter cards (type to search)", g_search, sizeof(g_search));
+        ImGui::PopStyleColor();
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(kTextLo));
+        ImGui::Text("ctrl+f to focus");
+        ImGui::PopStyleColor();
+        if (ImGui::IsKeyPressed(ImGuiKey_F) && ImGui::GetIO().KeyCtrl) ImGui::SetKeyboardFocusHere(-1);
+        ImGui::Dummy(ImVec2(0, 4));
 
         // Left rail
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::ColorConvertU32ToFloat4(kPanel));

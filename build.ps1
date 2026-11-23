@@ -31,7 +31,8 @@ $src = @(
     "src/hud.cpp",
     "src/keybind.cpp",
     "src/clipboard.cpp",
-    "src/snap.cpp"
+    "src/snap.cpp",
+    "src/events.cpp"
 )
 
 $imgui = @(

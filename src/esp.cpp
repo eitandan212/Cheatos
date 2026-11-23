@@ -8,7 +8,9 @@
 
 #include "../imgui/imgui.h"
 
+#include <windows.h>
 #include <cmath>
+#include <unordered_map>
 #include <cstdio>
 #include <vector>
 #include <algorithm>
@@ -73,13 +75,25 @@ void DrawCorners(ImDrawList* dl, float x, float y, float w, float h, uint32_t co
     dl->AddLine(ImVec2(x + w,      y + h),      ImVec2(x + w,      y + h - cy), col, 1.5f);
 }
 
-void DrawHealthBar(ImDrawList* dl, float x, float y, float h, int hp, int maxHp) {
-    float f = (float)std::clamp(hp, 0, maxHp) / (float)std::max(1, maxHp);
+void DrawHealthBar(ImDrawList* dl, float x, float y, float h, int hp, int maxHp, uint32_t key) {
+    static std::unordered_map<uint32_t, float> s_smooth;
+    float target = (float)std::clamp(hp, 0, maxHp) / (float)std::max(1, maxHp);
+    auto it = s_smooth.find(key);
+    float cur = (it == s_smooth.end()) ? target : it->second;
+    cur += (target - cur) * 0.20f;
+    s_smooth[key] = cur;
+
     float bw = 3.0f;
     dl->AddRectFilled(ImVec2(x - bw - 2, y), ImVec2(x - 2, y + h), IM_COL32(0, 0, 0, 180));
-    float fill = h * f;
+    float fill = h * cur;
     dl->AddRectFilled(ImVec2(x - bw - 2, y + (h - fill)), ImVec2(x - 2, y + h),
-                      HealthColor(hp, maxHp));
+                      HealthColor((int)(cur * maxHp), maxHp));
+    // ghost mark for the live value
+    if (std::fabs(cur - target) > 0.02f) {
+        float mark = y + (h - h * target);
+        dl->AddLine(ImVec2(x - bw - 2, mark), ImVec2(x - 2, mark),
+                    IM_COL32(0xE3, 0x4D, 0x5C, 200), 1.0f);
+    }
 }
 
 void DrawSkeleton(ImDrawList* dl, const Player& p, uint32_t col) {
@@ -142,9 +156,11 @@ void DrawRadar(ImDrawList* dl, const std::vector<Player>& players, const std::ve
     float size = g_cfg.radarSize;
     float cx = (float)Overlay::Width() - size * 0.5f - 24.0f;
     float cy = size * 0.5f + 24.0f;
-    dl->AddCircleFilled(ImVec2(cx, cy), size * 0.5f, IM_COL32(0, 0, 0, 140), 48);
-    dl->AddCircle      (ImVec2(cx, cy), size * 0.5f, IM_COL32(200, 40, 40, 220), 48, 1.5f);
-    float yaw = std::atan2(c.fwd.x, c.fwd.z);
+    dl->AddCircleFilled(ImVec2(cx, cy), size * 0.5f, IM_COL32(0, 0, 0, 160), 48);
+    dl->AddCircle      (ImVec2(cx, cy), size * 0.5f, IM_COL32(0x4C, 0xE0, 0xD9, 220), 48, 1.5f);
+    dl->AddLine(ImVec2(cx - size*0.5f, cy), ImVec2(cx + size*0.5f, cy), IM_COL32(0x2A, 0x31, 0x3D, 160), 1.0f);
+    dl->AddLine(ImVec2(cx, cy - size*0.5f), ImVec2(cx, cy + size*0.5f), IM_COL32(0x2A, 0x31, 0x3D, 160), 1.0f);
+    float yaw = (g_cfg.radarLock == RadarLock::CameraYaw) ? std::atan2(c.fwd.x, c.fwd.z) : 0.0f;
     float ca = std::cos(-yaw), sa = std::sin(-yaw);
     float sc = size / (g_cfg.radarRange * 2.0f);
     auto plot = [&](const Vec3& pos, uint32_t col, float rad) {
@@ -157,8 +173,12 @@ void DrawRadar(ImDrawList* dl, const std::vector<Player>& players, const std::ve
         if (std::hypot(px - cx, py - cy) < size * 0.5f)
             dl->AddCircleFilled(ImVec2(px, py), rad, col, 12);
     };
-    // camera indicator
-    dl->AddLine(ImVec2(cx, cy), ImVec2(cx, cy - 10), IM_COL32(255,255,255,200), 1.5f);
+    // camera indicator: rotated when radar is north-locked
+    {
+        float ia = (g_cfg.radarLock == RadarLock::WorldNorth) ? std::atan2(c.fwd.x, c.fwd.z) : 0.0f;
+        float ix = -std::sin(ia), iy = -std::cos(ia);
+        dl->AddLine(ImVec2(cx, cy), ImVec2(cx + ix * 12.0f, cy + iy * 12.0f), IM_COL32(0x7C,0xF7,0xF0,230), 1.5f);
+    }
     // players
     for (auto& p : players) {
         if (p.isLocalPlayer) continue;
@@ -321,7 +341,10 @@ void ESP::Render() {
     if (aim.mode != Aimbot::Mode::Off && aim.drawFov) {
         float cx = (float)Overlay::Width() * 0.5f;
         float cy = (float)Overlay::Height() * 0.5f;
-        dl->AddCircle(ImVec2(cx, cy), aim.fov, IM_COL32(0x4C, 0xE0, 0xD9, 160), 64, 1.0f);
+        bool aiming = (GetAsyncKeyState(aim.keyVk) & 0x8000) != 0;
+        ImU32 ring = aiming ? IM_COL32(0x7C, 0xF7, 0xF0, 230)
+                            : IM_COL32(0x4C, 0xE0, 0xD9, 110);
+        dl->AddCircle(ImVec2(cx, cy), aim.fov, ring, 64, aiming ? 1.6f : 1.0f);
     }
 
     if (AppState::Cfg().panicActive) return;
@@ -368,7 +391,7 @@ void ESP::Render() {
                 dl->AddLine(ImVec2(sx, sy), ImVec2(cx, botY), col, 1.0f);
             }
 
-            if (g_cfg.healthBar) DrawHealthBar(dl, x, topY, h, p.health, p.maxHealth);
+            if (g_cfg.healthBar) DrawHealthBar(dl, x, topY, h, p.health, p.maxHealth, p.entityId);
 
             float labelY = topY - 18.0f;
             if (g_cfg.nameTag) {

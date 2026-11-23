@@ -3,6 +3,7 @@
 #include "overlay.h"
 #include "offsets.h"
 #include "state.h"
+#include "events.h"
 
 #include "../imgui/imgui.h"
 
@@ -151,6 +152,7 @@ void TriggerStep(const std::vector<Player>& players, int localIdx, float cx, flo
         SendLeftClick();
         g_lastTrigFire = now;
         g_burstCount++;
+        Events::Push(Events::Kind::Trigger, "fired on %s", p.name.empty() ? "target" : p.name.c_str());
         return;
     }
 }
@@ -236,7 +238,12 @@ void Aimbot::Update() {
     if (!best) { g_stickyId = 0; g_lockFrames = 0; return; }
 
     if (g_stickyId == best->entityId) g_lockFrames++;
-    else                              g_lockFrames = 1;
+    else {
+        g_lockFrames = 1;
+        Events::Push(Events::Kind::Aim, "locked %s (%dm)",
+                     best->name.empty() ? "unknown" : best->name.c_str(),
+                     (int)best->distance);
+    }
     g_stickyId = best->entityId;
 
     float s[2];

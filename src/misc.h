@@ -4,7 +4,16 @@
 
 namespace Misc {
 
+struct SlotKey {
+    int saveVk   = 0;
+    int recallVk = 0;
+};
+
 struct Settings {
+    // saved teleport slots — save = press saveVk, recall = press recallVk
+    bool     slotHave[4]       = { false, false, false, false };
+    float    slotPos[4][3]     = {};
+    SlotKey  slotKeys[4]       = {};
     // movement
     bool  bhop            = false;       // auto space on LMB release / hold
     int   bhopKey         = 0x20;        // VK_SPACE

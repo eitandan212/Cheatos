@@ -6,6 +6,7 @@ namespace ESP {
 
 enum class CrosshairStyle { Dot, Cross, TCross, Circle, Bracket, Plus };
 enum class BoxStyle        { Corner, Full2D, Rounded, Edgeless };
+enum class RadarLock       { CameraYaw, WorldNorth };
 
 struct Settings {
     // master
@@ -41,6 +42,7 @@ struct Settings {
 
     // radar
     bool  radar        = true;
+    RadarLock radarLock = RadarLock::CameraYaw;
     float radarSize    = 220.0f;
     float radarRange   = 300.0f;
     bool  radarLoot    = false;
