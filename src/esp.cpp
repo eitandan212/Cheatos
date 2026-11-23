@@ -4,6 +4,7 @@
 #include "overlay.h"
 #include "portrait.h"
 #include "console.h"
+#include "state.h"
 
 #include "../imgui/imgui.h"
 
@@ -174,10 +175,29 @@ void DrawFar(ImDrawList* dl, const Vec3& w, uint32_t col) {
     if (!Game::Project(w, s, &depth)) return;
     float W = (float)Overlay::Width();
     float H = (float)Overlay::Height();
-    float x = std::clamp(s[0], 20.0f, W - 20.0f);
-    float y = std::clamp(s[1], 20.0f, H - 20.0f);
-    dl->AddCircleFilled(ImVec2(x, y), 4.0f, col, 12);
-    dl->AddCircle      (ImVec2(x, y), 6.0f, IM_COL32(0, 0, 0, 220), 12, 1.5f);
+    float cx = W * 0.5f;
+    float cy = H * 0.5f;
+    if (g_cfg.offscreenChevron) {
+        float dx = s[0] - cx;
+        float dy = s[1] - cy;
+        float len = std::hypot(dx, dy);
+        if (len < 1.0f) return;
+        dx /= len; dy /= len;
+        float r = std::min(W, H) * 0.42f;
+        float tx = cx + dx * r;
+        float ty = cy + dy * r;
+        float nx = -dy, ny = dx;
+        ImVec2 p0(tx + dx * 14, ty + dy * 14);
+        ImVec2 p1(tx - dx *  4 + nx * 10, ty - dy *  4 + ny * 10);
+        ImVec2 p2(tx - dx *  4 - nx * 10, ty - dy *  4 - ny * 10);
+        dl->AddTriangleFilled(p0, p1, p2, col);
+        dl->AddTriangle      (p0, p1, p2, IM_COL32(0, 0, 0, 200), 1.0f);
+    } else {
+        float x = std::clamp(s[0], 20.0f, W - 20.0f);
+        float y = std::clamp(s[1], 20.0f, H - 20.0f);
+        dl->AddCircleFilled(ImVec2(x, y), 4.0f, col, 12);
+        dl->AddCircle      (ImVec2(x, y), 6.0f, IM_COL32(0, 0, 0, 220), 12, 1.5f);
+    }
 }
 
 void DrawLootItem(ImDrawList* dl, const LootItem& li) {
@@ -294,7 +314,7 @@ void ESP::Render() {
     Game::SnapshotLoot(loot);
     Game::SnapshotMarks(marks);
 
-    if (g_cfg.watermark)  DrawWatermark(dl);
+    if (g_cfg.watermark && !AppState::Cfg().streamerMode)  DrawWatermark(dl);
     if (g_cfg.crosshair)  DrawCrosshair(dl);
 
     auto& aim = Aimbot::Cfg();
@@ -304,11 +324,16 @@ void ESP::Render() {
         dl->AddCircle(ImVec2(cx, cy), aim.fov, IM_COL32(0x4C, 0xE0, 0xD9, 160), 64, 1.0f);
     }
 
+    if (AppState::Cfg().panicActive) return;
+
     int vis = 0, far_ = 0;
     for (auto& p : players) {
         if (p.isLocalPlayer) continue;
         if (!p.alive && !g_cfg.showDead) continue;
         if (p.distance > g_cfg.maxDistance) continue;
+
+        bool isFriend = AppState::IsFriend(p.name, p.clan);
+        bool isWatch  = AppState::IsWatched(p.name, p.clan);
 
         float rootS[2], headS[2];
         bool rok = Game::WorldToScreen(p.root, rootS);
@@ -324,10 +349,18 @@ void ESP::Render() {
             float cx = (headS[0] + rootS[0]) * 0.5f;
             float x = cx - w * 0.5f;
 
-            uint32_t col = p.alive ? g_cfg.colorEnemy : g_cfg.colorDead;
+            uint32_t col =
+                !p.alive ? g_cfg.colorDead
+                : isWatch  ? g_cfg.colorWatch
+                : isFriend ? g_cfg.colorFriend
+                : g_cfg.colorEnemy;
 
-            if (g_cfg.cornerBox)    DrawCorners(dl, x, topY, w, h, col);
-            else if (g_cfg.box)     dl->AddRect(ImVec2(x, topY), ImVec2(x + w, topY + h), col, 0, 0, 1.4f);
+            switch (g_cfg.boxStyle) {
+                case BoxStyle::Corner:   DrawCorners(dl, x, topY, w, h, col); break;
+                case BoxStyle::Full2D:   dl->AddRect(ImVec2(x, topY), ImVec2(x + w, topY + h), col, 0, 0, 1.4f); break;
+                case BoxStyle::Rounded:  dl->AddRect(ImVec2(x, topY), ImVec2(x + w, topY + h), col, 4.0f, 0, 1.4f); break;
+                case BoxStyle::Edgeless: /* no box, label only */ break;
+            }
 
             if (g_cfg.snapline) {
                 float sx = (float)Overlay::Width() * 0.5f;
@@ -385,6 +418,7 @@ void ESP::Render() {
         for (auto& li : loot) {
             if (li.rarity < g_cfg.lootMinRarity) continue;
             if (li.distance > g_cfg.lootMaxDistance) continue;
+            if (!AppState::LootPasses(li.name, li.rarity)) continue;
             DrawLootItem(dl, li);
         }
     }

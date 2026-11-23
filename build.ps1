@@ -26,7 +26,12 @@ $src = @(
     "src/console.cpp",
     "src/mem.cpp",
     "src/portrait.cpp",
-    "src/portrait_images.cpp"
+    "src/portrait_images.cpp",
+    "src/state.cpp",
+    "src/hud.cpp",
+    "src/keybind.cpp",
+    "src/clipboard.cpp",
+    "src/snap.cpp"
 )
 
 $imgui = @(

@@ -2,6 +2,7 @@
 #include "game.h"
 #include "overlay.h"
 #include "offsets.h"
+#include "state.h"
 
 #include "../imgui/imgui.h"
 
@@ -166,6 +167,11 @@ Aimbot::Settings& Aimbot::Cfg()     { return g_cfg; }
 Aimbot::Trigger&  Aimbot::TrigCfg() { return g_trig; }
 
 void Aimbot::Update() {
+    if (AppState::Cfg().panicActive) {
+        g_stickyId = 0; g_lockFrames = 0;
+        g_remX = g_remY = 0.0f;
+        return;
+    }
     std::vector<Player> players;
     Game::SnapshotPlayers(players);
     int localIdx = Game::LocalPlayerIndex(players);
@@ -195,6 +201,7 @@ void Aimbot::Update() {
         const auto& p = players[i];
         if (!p.alive && g_cfg.ignoreDead) continue;
         if (p.distance > g_cfg.maxDistance) continue;
+        if (AppState::IsFriend(p.name, p.clan)) continue;
 
         Bone chosenBone = g_cfg.bone;
         if (g_cfg.mode == Mode::Rage && p.health > g_cfg.baimHpAbove)
@@ -222,6 +229,7 @@ void Aimbot::Update() {
             best = &p; bestAim = aim; bestSd = sd; bestScore = -1.0f; break;
         }
         float score = (g_cfg.priority == Priority::Crosshair) ? sd : p.distance;
+        if (AppState::IsWatched(p.name, p.clan)) score -= 500.0f;
         if (score < bestScore) { bestScore = score; best = &p; bestAim = aim; bestSd = sd; }
     }
 

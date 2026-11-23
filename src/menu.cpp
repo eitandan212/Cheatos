@@ -5,6 +5,9 @@
 #include "overlay.h"
 #include "console.h"
 #include "misc.h"
+#include "state.h"
+#include "clipboard.h"
+#include "snap.h"
 
 #include "../imgui/imgui.h"
 #include "../imgui/imgui_internal.h"
@@ -13,6 +16,7 @@
 #include <cstdint>
 #include <cstring>
 #include <vector>
+#include <algorithm>
 
 namespace {
 
@@ -428,6 +432,60 @@ void SecMisc() {
     EndCard();
 }
 
+void SecLists() {
+    SectionTitle("Lists", "// watchlist / friends / loot filter");
+    auto& st = AppState::Cfg();
+    BeginCard("WATCHLIST  (priority target names)");
+    for (size_t i = 0; i < st.watchlist.size(); ) {
+        ImGui::PushID((int)i);
+        ImGui::SetNextItemWidth(220);
+        ImGui::InputText("##w", st.watchlist[i].text, sizeof(st.watchlist[i].text));
+        ImGui::SameLine();
+        if (ImGui::SmallButton("x")) { st.watchlist.erase(st.watchlist.begin() + i); ImGui::PopID(); continue; }
+        ImGui::PopID();
+        ++i;
+    }
+    if (AccentButton("+ add row")) st.watchlist.push_back({""});
+    EndCard();
+
+    BeginCard("FRIENDS  (excluded from aim, tinted amber)");
+    for (size_t i = 0; i < st.friends.size(); ) {
+        ImGui::PushID(10000 + (int)i);
+        ImGui::SetNextItemWidth(220);
+        ImGui::InputText("##f", st.friends[i].text, sizeof(st.friends[i].text));
+        ImGui::SameLine();
+        if (ImGui::SmallButton("x")) { st.friends.erase(st.friends.begin() + i); ImGui::PopID(); continue; }
+        ImGui::PopID();
+        ++i;
+    }
+    if (AccentButton("+ add row")) st.friends.push_back({""});
+    EndCard();
+
+    BeginCard("LOOT FILTER");
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(kTextLo));
+    ImGui::TextUnformatted("whitelist rows gate what's shown; blacklist rows remove items.");
+    ImGui::PopStyleColor();
+    for (size_t i = 0; i < st.lootFilters.size(); ) {
+        ImGui::PushID(20000 + (int)i);
+        auto& f = st.lootFilters[i];
+        ImGui::Checkbox("##en", &f.enabled);
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(180);
+        ImGui::InputText("##txt", f.needle, sizeof(f.needle));
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(60);
+        ImGui::SliderInt("##rar", &f.minRarity, 0, 6);
+        ImGui::SameLine();
+        ImGui::Checkbox("white", &f.whitelist);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("x")) { st.lootFilters.erase(st.lootFilters.begin() + i); ImGui::PopID(); continue; }
+        ImGui::PopID();
+        ++i;
+    }
+    if (AccentButton("+ add rule")) st.lootFilters.push_back({});
+    EndCard();
+}
+
 void SecSettings() {
     SectionTitle("Config", "// profiles / palette / binds");
     BeginCard("PROFILES");
@@ -452,17 +510,86 @@ void SecSettings() {
     EndCard();
 
     auto& c = ESP::Cfg();
+    auto& st = AppState::Cfg();
+
+    BeginCard("THEME");
+    const char* themes[] = { "Cyan", "Rose", "Amber", "Purple", "Mono" };
+    int ti = (int)st.theme;
+    if (ImGui::Combo("Preset", &ti, themes, 5)) {
+        st.theme = (ThemePreset)ti;
+        Overlay::ApplyThemePreset(ti);
+    }
+    if (ImGui::SliderFloat("Menu alpha", &st.menuAlpha, 0.2f, 1.0f))
+        Overlay::SetMenuAlpha(st.menuAlpha);
+    ImGui::Checkbox("Menu slide-in animation", &st.menuAnimate);
+    EndCard();
+
     BeginCard("PALETTE");
     auto colorPick = [](const char* label, uint32_t& v) {
         ImVec4 iv = ImVecFromColor(v);
         if (ImGui::ColorEdit4(label, (float*)&iv, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar))
             v = ColorFromImVec(iv);
     };
-    colorPick("Enemy",   c.colorEnemy);
-    colorPick("Ally",    c.colorAlly);
-    colorPick("Dead",    c.colorDead);
-    colorPick("OwnTeam", c.colorOwnTeam);
-    colorPick("Text",    c.colorText);
+    colorPick("Enemy",    c.colorEnemy);
+    colorPick("Ally",     c.colorAlly);
+    colorPick("Dead",     c.colorDead);
+    colorPick("OwnTeam",  c.colorOwnTeam);
+    colorPick("Watchlist",c.colorWatch);
+    colorPick("Friends",  c.colorFriend);
+    colorPick("Text",     c.colorText);
+    EndCard();
+
+    BeginCard("HUD");
+    ImGui::Checkbox("Indicator panel",  &st.showIndicatorPanel);
+    ImGui::Checkbox("FPS counter",      &st.showFps);
+    ImGui::Checkbox("Target info card", &st.showTargetInfoCard);
+    EndCard();
+
+    BeginCard("SAFETY");
+    static bool panicPend = false;
+    BindButton("Panic key", &st.panic.vk, &panicPend);
+    const char* km[] = { "Off", "Always", "Hold", "Toggle" };
+    int mi = (int)st.panic.mode;
+    if (ImGui::Combo("Panic mode", &mi, km, 4)) st.panic.mode = (KeyMode)mi;
+    ImGui::Checkbox("Streamer mode (hide watermark + HUD)", &st.streamerMode);
+    if (st.panicActive) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(IM_COL32(0xE3, 0x4D, 0x5C, 0xFF)));
+        ImGui::TextUnformatted("PANIC ACTIVE — everything disabled");
+        ImGui::PopStyleColor();
+    }
+    EndCard();
+
+    BeginCard("SHARE");
+    if (AccentButton("Copy config to clipboard")) {
+        SavedBlob b;
+        b.esp  = ESP::Cfg();
+        b.aim  = Aimbot::Cfg();
+        b.trig = Aimbot::TrigCfg();
+        b.misc = Misc::Cfg();
+        std::string enc = Clip::Base64Encode((const uint8_t*)&b, sizeof(b));
+        Clip::SetText(enc);
+        Console::Success("config encoded %zu bytes to clipboard", enc.size());
+    }
+    ImGui::SameLine();
+    if (AccentButton("Paste config from clipboard")) {
+        std::string txt = Clip::GetText();
+        std::vector<uint8_t> raw;
+        if (Clip::Base64Decode(txt, raw) && raw.size() == sizeof(SavedBlob)) {
+            SavedBlob b; std::memcpy(&b, raw.data(), sizeof(b));
+            if (b.magic == 0x4B4F4C52 && b.version == 3) {
+                ESP::Cfg()        = b.esp;
+                Aimbot::Cfg()     = b.aim;
+                Aimbot::TrigCfg() = b.trig;
+                Misc::Cfg()       = b.misc;
+                Console::Success("config imported from clipboard");
+            } else {
+                Console::Warn("clipboard blob version mismatch");
+            }
+        } else {
+            Console::Warn("clipboard decode failed");
+        }
+    }
+    if (AccentButton("Screenshot now")) Snap::Save();
     EndCard();
 }
 
@@ -477,6 +604,7 @@ static const Section kSections[] = {
     { "[p]", "Players",  SecPlayers  },
     { "[w]", "World",    SecWorld    },
     { "[m]", "Misc",     SecMisc     },
+    { "[l]", "Lists",    SecLists    },
     { "[c]", "Config",   SecSettings },
 };
 
@@ -521,9 +649,24 @@ void Menu::Toggle() {
 bool Menu::IsOpen() { return g_open; }
 
 void Menu::Render() {
-    if (!g_open) return;
-    ImGui::SetNextWindowSize(ImVec2(760, 540), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowPos (ImVec2(140, 110), ImGuiCond_FirstUseEver);
+    auto& st = AppState::Cfg();
+    // Animation progress: ease toward 1 while open, toward 0 while closed.
+    if (st.menuAnimate) {
+        float dt = ImGui::GetIO().DeltaTime;
+        float tgt = g_open ? 1.0f : 0.0f;
+        st.menuAnimT += (tgt - st.menuAnimT) * std::min(1.0f, dt * 10.0f);
+    } else {
+        st.menuAnimT = g_open ? 1.0f : 0.0f;
+    }
+    if (st.menuAnimT < 0.02f) return;
+
+    float t = st.menuAnimT;
+    float ox = (1.0f - t) * -40.0f;        // slides from left
+    float alpha = t;
+    ImGui::SetNextWindowSize(ImVec2(760, 560), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos (ImVec2(140 + ox, 110), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowBgAlpha(alpha);
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, alpha);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14, 14));
     if (ImGui::Begin("loko.gg", &g_open,
         ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar))
@@ -566,9 +709,9 @@ void Menu::Render() {
         ImGui::PopStyleColor();
     }
     ImGui::End();
-    ImGui::PopStyleVar();
+    ImGui::PopStyleVar(2);
 
-    Overlay::SetClickThrough(!ImGui::GetIO().WantCaptureMouse);
+    Overlay::SetClickThrough(!g_open || !ImGui::GetIO().WantCaptureMouse);
 }
 
 static void ProfilePath(char* out, size_t n) {

@@ -270,6 +270,30 @@ void Overlay::SetClickThrough(bool through) {
 extern "C" ID3D11Device*        Overlay_GetDevice()  { return g_dev; }
 extern "C" ID3D11DeviceContext* Overlay_GetContext() { return g_ctx; }
 
+void Overlay::SetMenuAlpha(float a) {
+    if (a < 0.1f) a = 0.1f;
+    if (a > 1.0f) a = 1.0f;
+    ImGui::GetStyle().Alpha = a;
+}
+
+struct Palette {
+    int accentR, accentG, accentB;
+    int accentHiR, accentHiG, accentHiB;
+    int accentDimR, accentDimG, accentDimB;
+};
+static Palette g_pal = { 0x4C, 0xE0, 0xD9,  0x7C, 0xF7, 0xF0,  0x32, 0xAF, 0xAA };
+
+void Overlay::ApplyThemePreset(int preset) {
+    switch (preset) {
+        case 0: g_pal = { 0x4C,0xE0,0xD9, 0x7C,0xF7,0xF0, 0x32,0xAF,0xAA }; break; // Cyan
+        case 1: g_pal = { 0xE7,0x66,0x92, 0xFF,0x8C,0xB3, 0xB8,0x3B,0x66 }; break; // Rose
+        case 2: g_pal = { 0xFF,0xC2,0x66, 0xFF,0xE0,0x94, 0xC6,0x8A,0x30 }; break; // Amber
+        case 3: g_pal = { 0xB3,0x8C,0xFF, 0xD1,0xB8,0xFF, 0x7A,0x54,0xC6 }; break; // Purple
+        case 4: g_pal = { 0xC9,0xCE,0xD6, 0xE6,0xEA,0xF0, 0x82,0x8C,0x9B }; break; // Mono
+    }
+    Overlay::ApplyThemeDarkRed();
+}
+
 void Overlay::ApplyThemeDarkRed() {
     // klar.gg: near-black glass base, cyan/mint accent, flat cards
     ImGuiStyle& s = ImGui::GetStyle();
@@ -300,9 +324,9 @@ void Overlay::ApplyThemeDarkRed() {
     const ImVec4 panel   = rgb(20, 23, 29, 1.00f);
     const ImVec4 panelHi = rgb(26, 31, 39, 1.00f);
     const ImVec4 border  = rgb(42, 49, 61, 1.00f);
-    const ImVec4 accent  = rgb(76, 224, 217, 1.00f);
-    const ImVec4 accentD = rgb(50, 175, 170, 1.00f);
-    const ImVec4 accentH = rgb(124, 247, 240, 1.00f);
+    const ImVec4 accent  = rgb(g_pal.accentR,    g_pal.accentG,    g_pal.accentB,    1.00f);
+    const ImVec4 accentD = rgb(g_pal.accentDimR, g_pal.accentDimG, g_pal.accentDimB, 1.00f);
+    const ImVec4 accentH = rgb(g_pal.accentHiR,  g_pal.accentHiG,  g_pal.accentHiB,  1.00f);
     const ImVec4 textHi  = rgb(230, 234, 240, 1.00f);
     const ImVec4 textLo  = rgb(130, 140, 155, 1.00f);
 

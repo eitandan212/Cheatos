@@ -5,6 +5,7 @@
 namespace ESP {
 
 enum class CrosshairStyle { Dot, Cross, TCross, Circle, Bracket, Plus };
+enum class BoxStyle        { Corner, Full2D, Rounded, Edgeless };
 
 struct Settings {
     // master
@@ -16,7 +17,9 @@ struct Settings {
 
     // features
     bool  box          = true;
+    BoxStyle boxStyle  = BoxStyle::Corner;
     bool  cornerBox    = true;
+    bool  offscreenChevron = true;
     bool  snapline     = false;
     bool  healthBar    = true;
     bool  nameTag      = true;
@@ -58,6 +61,8 @@ struct Settings {
     uint32_t colorOwnTeam = 0xFF7CF7F0;  // bright cyan
     uint32_t colorText    = 0xFFE6EAF0;  // off-white
     uint32_t colorShadow  = 0xFF0F1115;  // near-black
+    uint32_t colorWatch   = 0xFFE34D5C;  // coral — priority target
+    uint32_t colorFriend  = 0xFFFFC266;  // amber — ally
 };
 
 Settings& Cfg();

@@ -11,6 +11,8 @@
 #include "menu.h"
 #include "misc.h"
 #include "portrait.h"
+#include "state.h"
+#include "hud.h"
 
 #pragma comment(lib, "user32.lib")
 
@@ -58,7 +60,8 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
         Console::Error("Overlay::Init failed");
         return 4;
     }
-    Overlay::ApplyThemeDarkRed();
+    Overlay::ApplyThemePreset((int)AppState::Cfg().theme);
+    Overlay::SetMenuAlpha(AppState::Cfg().menuAlpha);
     Portrait::Init();
     Portrait::RegisterAll();
     Menu::Init();
@@ -86,18 +89,23 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
         Overlay::MatchWindow(Game::GameWindow());
         Overlay::SetClickThrough(!Menu::IsOpen());
 
+        AppState::PollPanic();
         Game::Update();
-        Misc::Update();
+        if (!AppState::Cfg().panicActive) Misc::Update();
 
         if (!Overlay::BeginFrame()) break;  // WM_QUIT only
         ESP::Render();
-        if (!Menu::IsOpen()) {
+        if (!Menu::IsOpen() && !AppState::Cfg().panicActive) {
             Aimbot::Update();
             Aimbot::ApplyRcs();
         }
+        Hud::Render();
         Menu::Render();
-        Game::ReinforceTeleport();
-        Game::ReinforceAim();
+        if (!AppState::Cfg().panicActive) {
+            Game::ReinforceTeleport();
+            Game::ReinforceAim();
+        }
+        Hud::TickFps();
         Overlay::EndFrame();
     }
 
