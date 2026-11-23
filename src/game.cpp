@@ -1493,3 +1493,44 @@ void Game::ReinforceAim() {
     if (now > g_aim.untilSec) { g_aim.active = false; return; }
     WriteCameraBasisTo(g_aim.target);
 }
+
+bool Game::WriteCameraFov(float deg) {
+    if (!g_cineBrain || deg < 20.0f || deg > 170.0f) return false;
+    return Mem::WriteRaw(Mem::Pid(), g_cineBrain + offsets::cinemachine_brain::fov, &deg, sizeof(deg));
+}
+
+bool Game::WriteThirdPerson(float back, float upOff) {
+    if (!g_battleModel) return false;
+    uintptr_t cam = Mem::ReadPtr(g_battleModel + offsets::battle_model::camera);
+    if (!Mem::IsValidPtr(cam)) return false;
+    Vec3 p    = ReadVec3(cam + offsets::battle_camera_model::position);
+    Vec3 fwd  = ReadVec3(cam + offsets::battle_camera_model::forward);
+    Vec3 up   = ReadVec3(cam + offsets::battle_camera_model::up);
+    if (!InWorld(p) || !Unitish(fwd) || !Unitish(up)) return false;
+    Vec3 pulled(p.x - fwd.x * back + up.x * upOff,
+                p.y - fwd.y * back + up.y * upOff,
+                p.z - fwd.z * back + up.z * upOff);
+    return Mem::WriteRaw(Mem::Pid(), cam + offsets::battle_camera_model::position, &pulled, sizeof(pulled));
+}
+
+void Game::DisableThirdPerson() {
+    // no-op: without saving the original offset we can't restore without
+    // the next game-camera-tick which happens automatically.
+}
+
+bool Game::WriteCrouch(bool crouched) {
+    uintptr_t m = LocalModel();
+    if (!m) return false;
+    uintptr_t cr = Mem::ReadPtr(m + offsets::battle_character_model::crouch);
+    if (!Mem::IsValidPtr(cr)) return false;
+    uintptr_t pr = Mem::ReadPtr(cr + 0x10);
+    if (!Mem::IsValidPtr(pr)) return false;
+    uint8_t v = crouched ? 1 : 0;
+    return Mem::WriteRaw(Mem::Pid(), pr + offsets::primitive::value, &v, 1);
+}
+
+bool Game::LocalPlayerRoot(Vec3& out) {
+    uintptr_t m = LocalModel();
+    if (!m) return false;
+    return ReadPosition(m, out);
+}

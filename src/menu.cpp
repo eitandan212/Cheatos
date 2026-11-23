@@ -4,11 +4,14 @@
 #include "game.h"
 #include "overlay.h"
 #include "console.h"
+#include "misc.h"
 
 #include "../imgui/imgui.h"
 #include "../imgui/imgui_internal.h"
+#include <windows.h>
 #include <cstdio>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 namespace {
@@ -18,10 +21,58 @@ int  g_section = 0;
 
 struct SavedBlob {
     uint32_t magic = 0x4B4F4C52; // 'RLOK'
-    uint32_t version = 2;
-    ESP::Settings    esp;
-    Aimbot::Settings aim;
+    uint32_t version = 3;
+    ESP::Settings     esp;
+    Aimbot::Settings  aim;
+    Aimbot::Trigger   trig;
+    Misc::Settings    misc;
 };
+
+int  g_activeProfile = 0;
+char g_profileNames[3][16] = { "A", "B", "C" };
+
+const char* VkName(int vk) {
+    static char buf[32];
+    if (vk == 0) return "<none>";
+    if (vk == VK_LBUTTON)  return "MOUSE 1";
+    if (vk == VK_RBUTTON)  return "MOUSE 2";
+    if (vk == VK_MBUTTON)  return "MOUSE 3";
+    if (vk == VK_XBUTTON1) return "MOUSE 4";
+    if (vk == VK_XBUTTON2) return "MOUSE 5";
+    if (vk == VK_SHIFT)    return "SHIFT";
+    if (vk == VK_CONTROL)  return "CTRL";
+    if (vk == VK_MENU)     return "ALT";
+    if (vk == VK_SPACE)    return "SPACE";
+    if (vk == VK_TAB)      return "TAB";
+    if (vk == VK_INSERT)   return "INS";
+    if (vk == VK_END)      return "END";
+    if (vk >= 'A' && vk <= 'Z') { std::snprintf(buf, 32, "%c", vk); return buf; }
+    if (vk >= '0' && vk <= '9') { std::snprintf(buf, 32, "%c", vk); return buf; }
+    if (vk >= VK_F1 && vk <= VK_F12) { std::snprintf(buf, 32, "F%d", vk - VK_F1 + 1); return buf; }
+    std::snprintf(buf, 32, "0x%02X", vk);
+    return buf;
+}
+
+// Simple key-capture widget. While `*pending` is true, the next key hit
+// becomes `vk`. Returns true on a change.
+bool BindButton(const char* label, int* vk, bool* pending) {
+    char btn[48];
+    std::snprintf(btn, 48, "%s [%s]", *pending ? "press..." : label, VkName(*vk));
+    bool changed = false;
+    if (ImGui::Button(btn, ImVec2(-1, 0))) *pending = true;
+    if (*pending) {
+        for (int k = 1; k < 255; ++k) {
+            if (k == VK_ESCAPE) { if (GetAsyncKeyState(k) & 1) { *pending = false; break; } continue; }
+            if (GetAsyncKeyState(k) & 1) {
+                *vk = k;
+                *pending = false;
+                changed = true;
+                break;
+            }
+        }
+    }
+    return changed;
+}
 
 // ------------------------------------------------------------------
 // Klar palette + helpers
@@ -152,16 +203,27 @@ void StatRow(const char* k, const char* v) {
 // Sections
 // ------------------------------------------------------------------
 void SecAim() {
-    SectionTitle("Aim", "// trigger / bone / fov");
+    SectionTitle("Aim", "// legit / rage / target");
     auto& a = Aimbot::Cfg();
-    BeginCard("TARGET");
-    ImGui::Checkbox("Enable",             &a.enabled);
+    BeginCard("MODE");
+    const char* modes[] = { "Off", "Legit", "Rage" };
+    int mi = (int)a.mode;
+    if (ImGui::Combo("Mode", &mi, modes, 3)) a.mode = (Aimbot::Mode)mi;
+    static bool bindPend = false;
+    BindButton("Aim key", &a.keyVk, &bindPend);
     ImGui::Checkbox("Sticky target",      &a.sticky);
     ImGui::Checkbox("Ignore dead",        &a.ignoreDead);
     ImGui::Checkbox("Draw FOV",           &a.drawFov);
+    ImGui::Checkbox("Draw aim line",      &a.drawAimLine);
+    EndCard();
+
+    BeginCard("TARGET");
     const char* bones[] = { "Head", "Torso", "Legs", "Nearest" };
     int bi = (int)a.bone;
     if (ImGui::Combo("Bone", &bi, bones, 4)) a.bone = (Aimbot::Bone)bi;
+    const char* multis[] = { "Single", "Head + Torso", "Full rig" };
+    int mu = (int)a.multi;
+    if (ImGui::Combo("Multipoint", &mu, multis, 3)) a.multi = (Aimbot::Multi)mu;
     const char* prios[] = { "Closest to crosshair", "Closest in world" };
     int pi = (int)a.priority;
     if (ImGui::Combo("Priority", &pi, prios, 2)) a.priority = (Aimbot::Priority)pi;
@@ -171,6 +233,7 @@ void SecAim() {
     ImGui::SliderFloat("FOV (px)",        &a.fov,          20.0f, 600.0f, "%.0f");
     ImGui::SliderFloat("Smoothing",       &a.smooth,       1.0f,  20.0f);
     ImGui::SliderFloat("Max distance",    &a.maxDistance,  10.0f, 500.0f);
+    ImGui::SliderFloat("Safe-point edge", &a.safePointEdge,0.0f,  120.0f);
     EndCard();
 
     BeginCard("PREDICTION");
@@ -178,9 +241,32 @@ void SecAim() {
     ImGui::SliderFloat("Bullet speed",    &a.bulletSpeed,  50.0f, 1500.0f);
     EndCard();
 
-    BeginCard("RIG MODES");
+    BeginCard("RAGE");
+    ImGui::Checkbox("Auto fire",          &a.autoFire);
+    ImGui::SliderInt ("Lock dwell (frames)", &a.lockDwell, 1, 20);
+    ImGui::SliderInt ("Baim HP above",       &a.baimHpAbove, 0, 100);
     ImGui::Checkbox("Memory aim (writes camera basis)", &a.memoryAim);
-    ImGui::Checkbox("Recoil compensation",              &a.recoilComp);
+    EndCard();
+
+    BeginCard("RCS");
+    ImGui::Checkbox("Recoil control",     &a.rcs);
+    ImGui::SliderFloat("Strength",        &a.rcsStrength, 0.0f, 1.5f);
+    EndCard();
+}
+
+void SecTrigger() {
+    SectionTitle("Trigger", "// autoshoot on crosshair target");
+    auto& t = Aimbot::TrigCfg();
+    BeginCard("TRIGGER");
+    ImGui::Checkbox("Enable",             &t.enabled);
+    static bool pend = false;
+    BindButton("Trigger key", &t.keyVk, &pend);
+    ImGui::Checkbox("Only when aim-key held", &t.onlyWhenAiming);
+    ImGui::SliderInt ("Delay (ms)",       &t.delayMs, 0, 500);
+    ImGui::SliderInt ("Burst limit (0 = inf)", &t.burstMax, 0, 20);
+    ImGui::SliderInt ("FOV (px)",         &t.fovPx, 1, 200);
+    ImGui::Checkbox("Head only",          &t.headOnly);
+    ImGui::Checkbox("Body only",          &t.bodyOnly);
     EndCard();
 }
 
@@ -215,8 +301,17 @@ void SecVisuals() {
     ImGui::Checkbox("Chams wire",         &c.chamsWire);
     EndCard();
 
+    BeginCard("CROSSHAIR");
+    ImGui::Checkbox("Enabled",            &c.crosshair);
+    const char* styles[] = { "Dot", "Cross", "T-Cross", "Circle", "Bracket", "Plus" };
+    int cs = (int)c.crosshairStyle;
+    if (ImGui::Combo("Style", &cs, styles, 6)) c.crosshairStyle = (ESP::CrosshairStyle)cs;
+    ImGui::SliderFloat("Size",      &c.crosshairSize,  2.0f, 24.0f);
+    ImGui::SliderFloat("Gap",       &c.crosshairGap,   0.0f,  8.0f);
+    ImGui::SliderFloat("Thickness", &c.crosshairThick, 1.0f,  4.0f);
+    EndCard();
+
     BeginCard("HUD");
-    ImGui::Checkbox("Crosshair",          &c.crosshair);
     ImGui::Checkbox("Watermark",          &c.watermark);
     ImGui::Checkbox("Radar",              &c.radar);
     ImGui::Checkbox("Radar loot",         &c.radarLoot);
@@ -279,7 +374,8 @@ void SecWorld() {
 }
 
 void SecMisc() {
-    SectionTitle("Misc", "// fly / gun / probe");
+    SectionTitle("Misc", "// movement / view / probe");
+    auto& m = Misc::Cfg();
     BeginCard("MOVEMENT");
     static bool fly = false;
     if (ImGui::Checkbox("Fly mode", &fly)) {
@@ -290,14 +386,34 @@ void SecMisc() {
             Game::CancelTeleport();
         }
     }
+    static bool bhBind = false;
+    ImGui::Checkbox("Bunny hop",          &m.bhop);
+    BindButton("Jump key", &m.bhopKey, &bhBind);
+    ImGui::Separator();
+    ImGui::Checkbox("Fast duck",          &m.fastDuck);
+    ImGui::SliderInt("Duck rate (Hz)",    &m.fastDuckHz, 2, 30);
+    ImGui::Checkbox("Fake duck (write)",  &m.fakeDuck);
+    ImGui::Separator();
+    ImGui::Checkbox("Airstuck",           &m.airstuck);
+    static bool asBind = false;
+    BindButton("Airstuck key", &m.airstuckKey, &asBind);
+    EndCard();
+
+    BeginCard("VIEW");
+    ImGui::Checkbox("Third person",       &m.thirdPerson);
+    ImGui::SliderFloat("Distance",        &m.thirdDistance, 0.5f, 10.0f);
+    ImGui::SliderFloat("Height",          &m.thirdHeight,  -2.0f,  5.0f);
+    ImGui::Separator();
+    ImGui::Checkbox("FOV override",       &m.fovOverride);
+    ImGui::SliderFloat("FOV",             &m.fovDeg, 40.0f, 140.0f);
     EndCard();
 
     BeginCard("GUN MODS");
     static Game::GunToggles gun;
     bool ch = false;
-    ch |= ImGui::Checkbox("No recoil",  &gun.noRecoil);
-    ch |= ImGui::Checkbox("No spread",  &gun.noSpread);
-    ch |= ImGui::Checkbox("No sway",    &gun.noSway);
+    ch |= ImGui::Checkbox("No recoil",    &gun.noRecoil);
+    ch |= ImGui::Checkbox("No spread",    &gun.noSpread);
+    ch |= ImGui::Checkbox("No sway",      &gun.noSway);
     if (ch) Game::ApplyGun(gun);
     EndCard();
 
@@ -308,17 +424,31 @@ void SecMisc() {
     std::snprintf(buf, 48, "%dx%d", Overlay::Width(), Overlay::Height());
     StatRow("Screen",       buf);
     Cam c = Game::Camera();
-    std::snprintf(buf, 48, c.valid ? "ok" : "no camera");
-    StatRow("Status",       buf);
+    StatRow("Status",       c.valid ? "ok" : "no camera");
     EndCard();
 }
 
 void SecSettings() {
-    SectionTitle("Config", "// save / palette");
-    BeginCard("CONFIG FILE");
-    if (AccentButton("Save config")) Menu::SaveConfig();
-    ImGui::SameLine();
-    if (AccentButton("Load config")) Menu::LoadConfig();
+    SectionTitle("Config", "// profiles / palette / binds");
+    BeginCard("PROFILES");
+    for (int i = 0; i < 3; ++i) {
+        ImGui::PushID(i);
+        bool active = (g_activeProfile == i);
+        if (active) ImGui::PushStyleColor(ImGuiCol_Button,
+                        ImGui::ColorConvertU32ToFloat4(IM_COL32(32, 72, 70, 255)));
+        char tag[24];
+        std::snprintf(tag, 24, "slot %s", g_profileNames[i]);
+        if (ImGui::Button(tag, ImVec2(70, 28))) g_activeProfile = i;
+        if (active) ImGui::PopStyleColor();
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(120);
+        ImGui::InputText("##name", g_profileNames[i], 16);
+        ImGui::SameLine();
+        if (AccentButton("Save")) { Menu::SaveConfig(); }
+        ImGui::SameLine();
+        if (AccentButton("Load")) { g_activeProfile = i; Menu::LoadConfig(); }
+        ImGui::PopID();
+    }
     EndCard();
 
     auto& c = ESP::Cfg();
@@ -342,6 +472,7 @@ void SecSettings() {
 struct Section { const char* glyph; const char* label; void (*draw)(); };
 static const Section kSections[] = {
     { "[a]", "Aim",      SecAim      },
+    { "[t]", "Trigger",  SecTrigger  },
     { "[v]", "Visuals",  SecVisuals  },
     { "[p]", "Players",  SecPlayers  },
     { "[w]", "World",    SecWorld    },
@@ -440,27 +571,38 @@ void Menu::Render() {
     Overlay::SetClickThrough(!ImGui::GetIO().WantCaptureMouse);
 }
 
+static void ProfilePath(char* out, size_t n) {
+    char slot = 'A' + (char)(g_activeProfile % 3);
+    std::snprintf(out, n, "rob-run.%c.cfg", slot);
+}
+
 void Menu::SaveConfig() {
     SavedBlob b;
-    b.esp = ESP::Cfg();
-    b.aim = Aimbot::Cfg();
+    b.esp  = ESP::Cfg();
+    b.aim  = Aimbot::Cfg();
+    b.trig = Aimbot::TrigCfg();
+    b.misc = Misc::Cfg();
+    char path[64]; ProfilePath(path, sizeof(path));
     FILE* f = nullptr;
-    fopen_s(&f, "rob-run.cfg", "wb");
+    fopen_s(&f, path, "wb");
     if (!f) return;
     std::fwrite(&b, sizeof(b), 1, f);
     std::fclose(f);
-    Console::Success("config saved");
+    Console::Success("config saved -> %s", path);
 }
 
 void Menu::LoadConfig() {
+    char path[64]; ProfilePath(path, sizeof(path));
     FILE* f = nullptr;
-    fopen_s(&f, "rob-run.cfg", "rb");
+    fopen_s(&f, path, "rb");
     if (!f) return;
     SavedBlob b;
-    if (std::fread(&b, sizeof(b), 1, f) == 1 && b.magic == 0x4B4F4C52 && b.version == 2) {
-        ESP::Cfg()    = b.esp;
-        Aimbot::Cfg() = b.aim;
-        Console::Success("config loaded");
+    if (std::fread(&b, sizeof(b), 1, f) == 1 && b.magic == 0x4B4F4C52 && b.version == 3) {
+        ESP::Cfg()        = b.esp;
+        Aimbot::Cfg()     = b.aim;
+        Aimbot::TrigCfg() = b.trig;
+        Misc::Cfg()       = b.misc;
+        Console::Success("config loaded <- %s", path);
     }
     std::fclose(f);
 }

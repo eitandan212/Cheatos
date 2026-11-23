@@ -4,6 +4,8 @@
 
 namespace ESP {
 
+enum class CrosshairStyle { Dot, Cross, TCross, Circle, Bracket, Plus };
+
 struct Settings {
     // master
     bool  enabled      = true;
@@ -28,6 +30,10 @@ struct Settings {
     bool  skeleton     = true;
     bool  chamsWire    = false;
     bool  crosshair    = true;
+    CrosshairStyle crosshairStyle = CrosshairStyle::Cross;
+    float crosshairSize = 7.0f;
+    float crosshairGap  = 2.0f;
+    float crosshairThick= 1.4f;
     bool  watermark    = true;
 
     // radar

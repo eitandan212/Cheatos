@@ -223,11 +223,42 @@ void DrawCrosshair(ImDrawList* dl) {
     float cx = (float)Overlay::Width() * 0.5f;
     float cy = (float)Overlay::Height() * 0.5f;
     const ImU32 col = IM_COL32(0x4C, 0xE0, 0xD9, 230);
-    dl->AddLine(ImVec2(cx - 7, cy), ImVec2(cx - 2, cy), col, 1.4f);
-    dl->AddLine(ImVec2(cx + 2, cy), ImVec2(cx + 7, cy), col, 1.4f);
-    dl->AddLine(ImVec2(cx, cy - 7), ImVec2(cx, cy - 2), col, 1.4f);
-    dl->AddLine(ImVec2(cx, cy + 2), ImVec2(cx, cy + 7), col, 1.4f);
-    dl->AddCircleFilled(ImVec2(cx, cy), 1.5f, col, 10);
+    float sz = g_cfg.crosshairSize;
+    float gap = g_cfg.crosshairGap;
+    float t = g_cfg.crosshairThick;
+    switch (g_cfg.crosshairStyle) {
+        case ESP::CrosshairStyle::Dot:
+            dl->AddCircleFilled(ImVec2(cx, cy), std::max(1.5f, sz * 0.4f), col, 12);
+            break;
+        case ESP::CrosshairStyle::Cross:
+            dl->AddLine(ImVec2(cx - sz, cy), ImVec2(cx - gap, cy), col, t);
+            dl->AddLine(ImVec2(cx + gap, cy), ImVec2(cx + sz, cy), col, t);
+            dl->AddLine(ImVec2(cx, cy - sz), ImVec2(cx, cy - gap), col, t);
+            dl->AddLine(ImVec2(cx, cy + gap), ImVec2(cx, cy + sz), col, t);
+            break;
+        case ESP::CrosshairStyle::TCross:
+            dl->AddLine(ImVec2(cx - sz, cy), ImVec2(cx - gap, cy), col, t);
+            dl->AddLine(ImVec2(cx + gap, cy), ImVec2(cx + sz, cy), col, t);
+            dl->AddLine(ImVec2(cx, cy + gap), ImVec2(cx, cy + sz), col, t);
+            break;
+        case ESP::CrosshairStyle::Circle:
+            dl->AddCircle(ImVec2(cx, cy), sz, col, 24, t);
+            dl->AddCircleFilled(ImVec2(cx, cy), 1.0f, col, 8);
+            break;
+        case ESP::CrosshairStyle::Bracket:
+            dl->AddLine(ImVec2(cx - sz, cy - sz*0.3f), ImVec2(cx - sz, cy + sz*0.3f), col, t);
+            dl->AddLine(ImVec2(cx - sz, cy - sz*0.3f), ImVec2(cx - sz*0.7f, cy - sz*0.3f), col, t);
+            dl->AddLine(ImVec2(cx - sz, cy + sz*0.3f), ImVec2(cx - sz*0.7f, cy + sz*0.3f), col, t);
+            dl->AddLine(ImVec2(cx + sz, cy - sz*0.3f), ImVec2(cx + sz, cy + sz*0.3f), col, t);
+            dl->AddLine(ImVec2(cx + sz, cy - sz*0.3f), ImVec2(cx + sz*0.7f, cy - sz*0.3f), col, t);
+            dl->AddLine(ImVec2(cx + sz, cy + sz*0.3f), ImVec2(cx + sz*0.7f, cy + sz*0.3f), col, t);
+            break;
+        case ESP::CrosshairStyle::Plus:
+            dl->AddLine(ImVec2(cx - sz, cy), ImVec2(cx + sz, cy), col, t);
+            dl->AddLine(ImVec2(cx, cy - sz), ImVec2(cx, cy + sz), col, t);
+            dl->AddCircleFilled(ImVec2(cx, cy), 1.2f, IM_COL32(0, 0, 0, 220), 10);
+            break;
+    }
 }
 
 void DrawWatermark(ImDrawList* dl) {
@@ -267,10 +298,10 @@ void ESP::Render() {
     if (g_cfg.crosshair)  DrawCrosshair(dl);
 
     auto& aim = Aimbot::Cfg();
-    if (aim.enabled && aim.drawFov) {
+    if (aim.mode != Aimbot::Mode::Off && aim.drawFov) {
         float cx = (float)Overlay::Width() * 0.5f;
         float cy = (float)Overlay::Height() * 0.5f;
-        dl->AddCircle(ImVec2(cx, cy), aim.fov, IM_COL32(255, 60, 60, 160), 64, 1.0f);
+        dl->AddCircle(ImVec2(cx, cy), aim.fov, IM_COL32(0x4C, 0xE0, 0xD9, 160), 64, 1.0f);
     }
 
     int vis = 0, far_ = 0;

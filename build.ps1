@@ -22,6 +22,7 @@ $src = @(
     "src/esp.cpp",
     "src/menu.cpp",
     "src/aimbot.cpp",
+    "src/misc.cpp",
     "src/console.cpp",
     "src/mem.cpp",
     "src/portrait.cpp",

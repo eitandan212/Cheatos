@@ -110,6 +110,13 @@ void  ReinforceTeleport();
 bool  MemoryAim(const Vec3& worldTarget);
 void  ReinforceAim();
 
+// -------- camera / player writes (klar misc feature set) --------
+bool  WriteCameraFov(float deg);
+bool  WriteThirdPerson(float backOffset, float upOffset);
+void  DisableThirdPerson();
+bool  WriteCrouch(bool crouched);
+bool  LocalPlayerRoot(Vec3& out);
+
 // -------- gun --------
 struct GunToggles {
     bool noRecoil = false;

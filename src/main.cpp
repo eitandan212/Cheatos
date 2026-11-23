@@ -9,6 +9,7 @@
 #include "esp.h"
 #include "aimbot.h"
 #include "menu.h"
+#include "misc.h"
 #include "portrait.h"
 
 #pragma comment(lib, "user32.lib")
@@ -86,10 +87,14 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
         Overlay::SetClickThrough(!Menu::IsOpen());
 
         Game::Update();
+        Misc::Update();
 
         if (!Overlay::BeginFrame()) break;  // WM_QUIT only
         ESP::Render();
-        if (!Menu::IsOpen()) Aimbot::Update();
+        if (!Menu::IsOpen()) {
+            Aimbot::Update();
+            Aimbot::ApplyRcs();
+        }
         Menu::Render();
         Game::ReinforceTeleport();
         Game::ReinforceAim();
