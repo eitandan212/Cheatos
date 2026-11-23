@@ -8,6 +8,7 @@
 #include "../imgui/imgui.h"
 
 #include <windows.h>
+#include <algorithm>
 #include <cmath>
 #include <vector>
 #include <unordered_map>
@@ -31,6 +32,7 @@ bool   g_rcsHavePrev = false;
 // trigger state
 double g_lastTrigFire = 0.0;
 int    g_burstCount   = 0;
+double g_lastAutoFire = 0.0;
 
 struct VelTrack { Vec3 pos; Vec3 vel; double t = 0.0; bool have = false; };
 std::unordered_map<uint32_t, VelTrack> g_vel;
@@ -38,6 +40,21 @@ std::unordered_map<uint32_t, VelTrack> g_vel;
 double NowSec() {
     using C = std::chrono::steady_clock;
     return std::chrono::duration<double>(C::now().time_since_epoch()).count();
+}
+
+// Projection works in the game's client rectangle, so the crosshair centre has
+// to come from the same rectangle. Overlay size is only a fallback for the
+// frames before the game window has been measured.
+void Centre(float& cx, float& cy) {
+    Game::ScreenCenter(cx, cy);
+    if (cx < 1.0f || cy < 1.0f) {
+        cx = (float)Overlay::Width()  * 0.5f;
+        cy = (float)Overlay::Height() * 0.5f;
+    }
+}
+
+bool InputAllowed() {
+    return !g_cfg.requireFocus || Game::IsForeground();
 }
 
 Vec3 LeadPoint(const Player& p, const Vec3& base, float dist) {
@@ -106,6 +123,8 @@ bool PickBestPoint(const Player& p, float cx, float cy, Vec3& best, float& bestS
 }
 
 void SendMouse(float dx, float dy) {
+    if (!InputAllowed()) { g_remX = g_remY = 0.0f; return; }
+    if (!std::isfinite(dx) || !std::isfinite(dy)) return;
     g_remX += dx; g_remY += dy;
     LONG ix = (LONG)g_remX; LONG iy = (LONG)g_remY;
     g_remX -= ix; g_remY -= iy;
@@ -117,11 +136,31 @@ void SendMouse(float dx, float dy) {
 }
 
 void SendLeftClick() {
+    if (!InputAllowed()) return;
     INPUT down{}, up{};
     down.type = INPUT_MOUSE; down.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
     up.type   = INPUT_MOUSE; up.mi.dwFlags   = MOUSEEVENTF_LEFTUP;
     SendInput(1, &down, sizeof(down));
     SendInput(1, &up,   sizeof(up));
+}
+
+// Rate-limited click for autofire, so a locked target is not clicked once per
+// rendered frame.
+void AutoFire() {
+    const double now = NowSec();
+    const double gap = (double)(g_cfg.autoFireMs > 0 ? g_cfg.autoFireMs : 1) / 1000.0;
+    if (now - g_lastAutoFire < gap) return;
+    g_lastAutoFire = now;
+    SendLeftClick();
+}
+
+void PruneVelocity() {
+    if (g_vel.size() < 64) return;
+    const double now = NowSec();
+    for (auto it = g_vel.begin(); it != g_vel.end();) {
+        if (now - it->second.t > 5.0) it = g_vel.erase(it);
+        else ++it;
+    }
 }
 
 void TriggerStep(const std::vector<Player>& players, int localIdx, float cx, float cy) {
@@ -138,17 +177,20 @@ void TriggerStep(const std::vector<Player>& players, int localIdx, float cx, flo
         const auto& p = players[i];
         if (!p.alive && g_cfg.ignoreDead) continue;
         if (p.distance > g_cfg.maxDistance) continue;
-        float s[2]; if (!Game::WorldToScreen(p.head, s)) continue;
-        float sd = std::hypot(s[0] - cx, s[1] - cy);
-        if (sd > g_trig.fovPx) continue;
+        if (AppState::IsFriend(p.name, p.clan)) continue;
 
-        if (g_trig.headOnly) {
-            // only when the center is on the head bone neighborhood
-            if (s[1] < cy - g_trig.fovPx * 2) continue;
-        } else if (g_trig.bodyOnly) {
-            float sb[2]; if (!Game::WorldToScreen(p.root, sb)) continue;
-            if (sb[1] < cy) continue;
-        }
+        // headOnly / bodyOnly pick which point has to be under the crosshair,
+        // rather than guessing from where the point landed on screen.
+        Vec3 pt = p.head;
+        if (g_trig.bodyOnly)
+            pt = Vec3(p.root.x, p.root.y + offsets::skeleton::torso_height, p.root.z);
+        else if (g_trig.headOnly)
+            pt = p.hasRig ? p.head : AimOffsetForBone(p, Aimbot::Bone::Head);
+
+        float s[2]; if (!Game::WorldToScreen(pt, s)) continue;
+        float sd = std::hypot(s[0] - cx, s[1] - cy);
+        if (sd > (float)g_trig.fovPx) continue;
+
         SendLeftClick();
         g_lastTrigFire = now;
         g_burstCount++;
@@ -158,8 +200,10 @@ void TriggerStep(const std::vector<Player>& players, int localIdx, float cx, flo
 }
 
 bool PassSafePoint(float sx, float sy) {
-    float W = (float)Overlay::Width(), H = (float)Overlay::Height();
-    float e = g_cfg.safePointEdge;
+    float cx = 0, cy = 0;
+    Centre(cx, cy);
+    const float W = cx * 2.0f, H = cy * 2.0f;
+    const float e = g_cfg.safePointEdge;
     return sx > e && sy > e && sx < W - e && sy < H - e;
 }
 
@@ -177,8 +221,9 @@ void Aimbot::Update() {
     std::vector<Player> players;
     Game::SnapshotPlayers(players);
     int localIdx = Game::LocalPlayerIndex(players);
-    float cx = (float)Overlay::Width() * 0.5f;
-    float cy = (float)Overlay::Height() * 0.5f;
+    float cx = 0, cy = 0;
+    Centre(cx, cy);
+    PruneVelocity();
 
     TriggerStep(players, localIdx, cx, cy);
 
@@ -196,7 +241,6 @@ void Aimbot::Update() {
     const Player* best = nullptr;
     float bestScore = 1e9f;
     Vec3  bestAim;
-    float bestSd = 0;
 
     for (int i = 0; i < (int)players.size(); ++i) {
         if (i == localIdx) continue;
@@ -228,11 +272,11 @@ void Aimbot::Update() {
         if (sd > g_cfg.fov) continue;
 
         if (g_cfg.sticky && g_stickyId && p.entityId == g_stickyId) {
-            best = &p; bestAim = aim; bestSd = sd; bestScore = -1.0f; break;
+            best = &p; bestAim = aim; bestScore = -1.0f; break;
         }
         float score = (g_cfg.priority == Priority::Crosshair) ? sd : p.distance;
         if (AppState::IsWatched(p.name, p.clan)) score -= 500.0f;
-        if (score < bestScore) { bestScore = score; best = &p; bestAim = aim; bestSd = sd; }
+        if (score < bestScore) { bestScore = score; best = &p; bestAim = aim; }
     }
 
     if (!best) { g_stickyId = 0; g_lockFrames = 0; return; }
@@ -249,35 +293,46 @@ void Aimbot::Update() {
     float s[2];
     if (!Game::WorldToScreen(bestAim, s)) return;
 
+    auto drawLine = [&]() {
+        if (!g_cfg.drawAimLine) return;
+        ImDrawList* dl = ImGui::GetForegroundDrawList();
+        dl->AddLine(ImVec2(cx, cy), ImVec2(s[0], s[1]), IM_COL32(124, 247, 240, 220), 1.4f);
+    };
+    const bool mayFire = g_cfg.mode == Mode::Rage && g_cfg.autoFire &&
+                         g_lockFrames >= g_cfg.lockDwell;
+
     if (g_cfg.memoryAim && Game::MemoryAim(bestAim)) {
-        if (g_cfg.mode == Mode::Rage && g_cfg.autoFire && g_lockFrames >= g_cfg.lockDwell)
-            SendLeftClick();
-        if (g_cfg.drawAimLine) {
-            ImDrawList* dl = ImGui::GetForegroundDrawList();
-            dl->AddLine(ImVec2(cx, cy), ImVec2(s[0], s[1]), IM_COL32(124, 247, 240, 220), 1.4f);
-        }
+        if (mayFire) AutoFire();
+        drawLine();
         return;
     }
 
-    float dx = s[0] - cx;
-    float dy = s[1] - cy;
-    float scale = 1.0f / std::max(1.0f, g_cfg.smooth);
-    float mx = dx * scale;
-    float my = dy * scale;
-    Game::ScaleAimMove(mx, my);
+    // Angular error -> mouse counts. Smoothing divides the angle, not the
+    // pixels, so the feel of a given smooth value no longer depends on
+    // resolution or FOV.
+    float dYaw = 0, dPitch = 0;
+    if (!Game::AimDeltaDegrees(bestAim, dYaw, dPitch)) { drawLine(); return; }
+
+    const float sm = std::max(1.0f, g_cfg.smooth);
+    float mx = 0, my = 0;
+    Game::AnglesToCounts(dYaw / sm, dPitch / sm, mx, my);
+
+    const float trim = std::isfinite(g_cfg.sensScale) ? g_cfg.sensScale : 1.0f;
+    mx *= trim;
+    my *= trim;
+
+    const float cap = std::max(1.0f, g_cfg.maxCounts);
+    mx = std::clamp(mx, -cap, cap);
+    my = std::clamp(my, -cap, cap);
     SendMouse(mx, my);
 
-    if (g_cfg.mode == Mode::Rage && g_cfg.autoFire && g_lockFrames >= g_cfg.lockDwell)
-        SendLeftClick();
-
-    if (g_cfg.drawAimLine) {
-        ImDrawList* dl = ImGui::GetForegroundDrawList();
-        dl->AddLine(ImVec2(cx, cy), ImVec2(s[0], s[1]), IM_COL32(124, 247, 240, 220), 1.4f);
-    }
+    if (mayFire) AutoFire();
+    drawLine();
 }
 
 void Aimbot::ApplyRcs() {
-    if (!g_cfg.rcs) { g_rcsHavePrev = false; return; }
+    if (!g_cfg.rcs || AppState::Cfg().panicActive) { g_rcsHavePrev = false; return; }
+    if (!InputAllowed())                           { g_rcsHavePrev = false; return; }
     bool lmb = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
     if (!lmb) { g_rcsHavePrev = false; return; }
     Cam c = Game::Camera();
@@ -292,14 +347,25 @@ void Aimbot::ApplyRcs() {
     float dPitch = pitch - g_rcsPitch;
     if (dYaw >  3.14159f) dYaw -= 6.2831853f;
     if (dYaw < -3.14159f) dYaw += 6.2831853f;
-    // If pitch keeps rising (gun pulls up), apply inverse mouse down
-    if (dPitch > 0.0005f) {
-        float counter = -dPitch * 1800.0f * g_cfg.rcsStrength;
-        SendMouse(0.0f, counter);
-    }
-    if (std::fabs(dYaw) > 0.0005f) {
-        float counter = -dYaw * 1800.0f * g_cfg.rcsStrength * 0.5f;
-        SendMouse(counter, 0.0f);
-    }
     g_rcsYaw = yaw; g_rcsPitch = pitch;
+
+    // Only a climb is recoil; a drop is the player pulling down. Convert the
+    // observed climb into a counter angle and let the sensitivity conversion
+    // turn that into counts, instead of a hand-tuned pixel constant.
+    constexpr float kRad2Deg = 57.295779513f;
+    const float climbDeg = dPitch * kRad2Deg;
+    const float driftDeg = dYaw   * kRad2Deg;
+    if (std::fabs(climbDeg) > 12.0f || std::fabs(driftDeg) > 12.0f) return;  // not recoil
+
+    float wantPitch = 0.0f, wantYaw = 0.0f;
+    if (climbDeg > 0.003f) wantPitch = -climbDeg * g_cfg.rcsStrength;
+    if (std::fabs(driftDeg) > 0.003f) wantYaw = -driftDeg * g_cfg.rcsStrength * 0.5f;
+    if (wantPitch == 0.0f && wantYaw == 0.0f) return;
+
+    float mx = 0, my = 0;
+    Game::AnglesToCounts(wantYaw, wantPitch, mx, my);
+    const float cap = std::max(1.0f, g_cfg.maxCounts);
+    mx = std::clamp(mx, -cap, cap);
+    my = std::clamp(my, -cap, cap);
+    SendMouse(mx, my);
 }

@@ -98,9 +98,19 @@ struct AimState {
 };
 AimState g_aim;
 
-// recoil/spread/sway pin-restore
-std::unordered_map<uintptr_t, uint32_t> g_pinRestore;
-Game::GunToggles                        g_gunState;
+// recoil/spread/sway pins. A pin records the exact bytes it overwrote so the
+// restore is byte-exact, and the owning model so a pin is never written back
+// to an address whose object has already been destroyed.
+constexpr size_t kPinMax = 32;
+struct Pin {
+    uintptr_t addr  = 0;
+    uint32_t  size  = 0;
+    uint8_t   owner = 0;        // bit 0 recoil, 1 spread, 2 sway
+    uint8_t   orig[kPinMax]{};
+};
+std::vector<Pin>  g_pins;
+uintptr_t         g_pinModel = 0;      // model the pins belong to
+Game::GunToggles  g_gunState;
 
 // sensitivity calibration
 struct SensSample { double dxRot, dyRot, mx, my; };
@@ -109,6 +119,21 @@ float g_cpdX = 0.0f, g_cpdY = 0.0f;
 float g_lastYaw = 0.0f, g_lastPitch = 0.0f;
 bool  g_sensHaveLast = false;
 float g_lastAimDx = 0.0f, g_lastAimDy = 0.0f;
+
+// klass resolution bookkeeping: a name that never matches is given up on so
+// the scanner stops re-sweeping the address space for it every cycle.
+constexpr int kKlassMaxTries = 3;
+std::unordered_map<std::string, int> g_klassTries;
+std::unordered_set<std::string>      g_klassGated;
+int  g_klassArenaMisses = 0;
+
+// teleport rejection tracking (server pulled us back)
+constexpr int   kTpRejectLimit    = 10;     // consecutive reverted frames
+constexpr float kTpRejectDistance = 2.5f;   // metres of drift that counts as a revert
+int  g_tpRejectRun   = 0;
+int  g_tpRejectTotal = 0;
+Vec3 g_tpLastWrite;
+bool g_tpHaveLastWrite = false;
 
 // gather pacing
 auto g_lastCharGather = Clock::now() - std::chrono::seconds(1);
@@ -244,10 +269,12 @@ void ScanKlassNames(const std::vector<std::string>& wanted,
     auto t0 = Clock::now();
     const auto budget = std::chrono::milliseconds(2500);
     MEMORY_BASIC_INFORMATION mbi;
-    // start at arena low but fall through to the whole private range if arena is empty
+    // Start at the arena guess, then fall through to the whole private range.
+    // Once the arena has come up empty twice we stop paying for that pass.
     uintptr_t addr = offsets::klass_arena_lo;
     uintptr_t hi   = offsets::klass_arena_hi;
     int phase = 0;
+    if (g_klassArenaMisses >= 2) { addr = 0x10000; hi = 0x7FFFFFFFFFFFULL; phase = 1; }
     while (out.size() < wanted.size()) {
         if (Clock::now() - t0 > budget) break;
         if (addr >= hi) {
@@ -284,6 +311,11 @@ void ScanKlassNames(const std::vector<std::string>& wanted,
         addr = next;
     }
     CloseHandle(h);
+    if (phase == 0 && out.empty() && g_klassArenaMisses < 2) {
+        g_klassArenaMisses++;
+        if (g_klassArenaMisses == 2)
+            Console::Warn("klass arena window empty twice, full sweep only from now on");
+    }
 }
 
 uintptr_t ResolveKlassByRva(uintptr_t rva) {
@@ -322,7 +354,9 @@ void ResolveAllKlasses() {
     // Fill the rest by name-scan
     std::vector<std::string> wanted;
     auto need = [&](uintptr_t& dst, const char* n) {
-        if (!dst) wanted.push_back(n);
+        if (dst) return;
+        if (g_klassGated.find(n) != g_klassGated.end()) return;   // given up on
+        wanted.push_back(n);
     };
     need(g_k.battleModel, "BattleModel");
     need(g_k.battleEntitiesModel, "BattleEntitiesModel");
@@ -363,6 +397,16 @@ void ResolveAllKlasses() {
     fill(g_k.weaponSpread, "WeaponSpread");
     fill(g_k.spriteRecoilView, "SpriteRecoilViewDescription");
     fill(g_k.weaponInertiaData, "WeaponInertiaData");
+
+    // Anything still missing after this sweep burned a try. Three empty sweeps
+    // and the name is gated: the feature behind it stays off and the scanner
+    // stops paying 2.5 s per cycle looking for a name this build doesn't have.
+    for (const auto& w : wanted) {
+        if (hits.find(w) != hits.end()) continue;
+        int t = ++g_klassTries[w];
+        if (t >= kKlassMaxTries && g_klassGated.insert(w).second)
+            Console::Warn("klass '%s' not present after %d sweeps, feature gated off", w.c_str(), t);
+    }
 }
 
 // ==========================================================================
@@ -545,7 +589,9 @@ void UpdateCameraImpl() {
 Cam GetCameraForUse() {
     if (g_cam.valid && g_camHoldFrames == 0) return g_cam;
     if (g_camHoldFrames < 12 && g_heldCam.valid) return g_heldCam;
-    return g_cam;
+    // Past the hold window the last good basis is no longer evidence about
+    // where the camera is pointing. Report invalid rather than project from it.
+    return Cam{};
 }
 
 // ==========================================================================
@@ -584,7 +630,8 @@ void IterateDict(uintptr_t dict, std::vector<std::pair<int32_t, uintptr_t>>& out
     if (!Mem::IsValidPtr(dict)) return;
     uintptr_t entries = Mem::ReadPtr(dict + offsets::dict_entries);
     int32_t count = Mem::ReadT<int32_t>(dict + offsets::dict_count);
-    if (!Mem::IsValidPtr(entries) || count <= 0 || count > (int32_t)cap) return;
+    if (!Mem::IsValidPtr(entries) || count <= 0) return;
+    if (count > (int32_t)cap) count = (int32_t)cap;   // read the head, don't drop the dict
     uintptr_t base = entries + offsets::array_items;
     for (int32_t i = 0; i < count; ++i) {
         uintptr_t e = base + (uintptr_t)i * offsets::dict_entry_stride;
@@ -974,6 +1021,41 @@ void RebuildViewMap() {
     for (auto& e : entries) g_viewForEntity[(uint32_t)e.first] = e.second;
 }
 
+// A full gather walks dictionaries and reads names, roles and held items, which
+// is why it runs at 20 Hz. Positions, heads, rigs and health change every frame
+// though, and boxes drawn from 50 ms-old positions visibly lag the player. This
+// re-reads just the per-frame fields of entities already known.
+void RefreshSnapshot(std::vector<Player>& players) {
+    Cam c = GetCameraForUse();
+    const double now = std::chrono::duration<double>(Clock::now().time_since_epoch()).count();
+    for (auto& p : players) {
+        if (!p.model) continue;
+        Vec3 root;
+        if (!ReadPosition(p.model, root)) continue;      // partial read: keep last good
+        p.root = root;
+        g_posMem[(uint64_t)p.model] = root;
+
+        Vec3 head, foot;
+        ReadHitboxBones(p.model, root, head, foot);
+        p.head = head;
+
+        uintptr_t view = 0;
+        if (auto it = g_viewForEntity.find(p.entityId); it != g_viewForEntity.end())
+            view = it->second;
+        if (view) {
+            FillRig(view, p.rig, root);
+            p.hasRig = p.rig.filled;
+            Vec3 h;
+            if (ReadViewHead(view, h)) p.head = h;
+        }
+
+        ReadHealth(p.model, p.isLocalPlayer, p.health, p.maxHealth);
+        p.alive = p.health > 0;
+        if (c.valid) p.distance = Game::Distance3D(c.pos, root);
+        p.lastSeen = now;
+    }
+}
+
 void GatherCharacters(std::vector<Player>& out) {
     out.clear();
     if (!g_battleEntities) return;
@@ -1173,51 +1255,91 @@ void SteerFly(Vec3& point) {
 }
 
 // ==========================================================================
-// Pin-restore helper
+// Pin helpers
 // ==========================================================================
-void PinZero(uintptr_t addr, size_t size) {
-    if (!Mem::IsValidPtr(addr) || size == 0 || size > 64) return;
-    uint32_t cur = 0;
-    if (g_pinRestore.find(addr) == g_pinRestore.end()) {
-        if (!Mem::ReadRaw(Mem::Pid(), addr, &cur, (size > 4 ? 4 : size))) return;
-        g_pinRestore[addr] = cur;
+// A pin zeroes a field every frame and remembers the exact bytes it replaced.
+// Two rules make it safe: nothing is written until the bytes read back as
+// plausible floats, and pins are dropped (never written back) once the model
+// that owned them is gone, because that address may already be reused.
+bool PinLooksLikeFloats(uintptr_t addr, size_t size) {
+    if (size < 4 || size > kPinMax || (size % 4) != 0) return false;
+    float f[kPinMax / 4]{};
+    if (!Mem::ReadRaw(Mem::Pid(), addr, f, size)) return false;
+    const size_t n = size / 4;
+    for (size_t i = 0; i < n; ++i) {
+        if (!std::isfinite(f[i])) return false;
+        if (std::fabs(f[i]) > 1.0e5f) return false;
     }
-    uint8_t zero[64] = {};
+    return true;
+}
+
+int PinFind(uintptr_t addr) {
+    for (size_t i = 0; i < g_pins.size(); ++i)
+        if (g_pins[i].addr == addr) return (int)i;
+    return -1;
+}
+
+void PinApply(uintptr_t addr, size_t size, uint8_t ownerBit) {
+    if (!Mem::IsValidPtr(addr) || size == 0 || size > kPinMax) return;
+    int idx = PinFind(addr);
+    if (idx < 0) {
+        if (!PinLooksLikeFloats(addr, size)) return;   // offset is wrong, do not scribble
+        if (g_pins.size() >= 64) return;
+        Pin pin;
+        pin.addr = addr;
+        pin.size = (uint32_t)size;
+        pin.owner = ownerBit;
+        if (!Mem::ReadRaw(Mem::Pid(), addr, pin.orig, size)) return;
+        g_pins.push_back(pin);
+        idx = (int)g_pins.size() - 1;
+    } else {
+        g_pins[(size_t)idx].owner |= ownerBit;
+    }
+    uint8_t zero[kPinMax] = {};
     Mem::WriteRaw(Mem::Pid(), addr, zero, size);
 }
 
-void RestoreAll() {
-    for (auto& kv : g_pinRestore) {
-        Mem::WriteRaw(Mem::Pid(), kv.first, &kv.second, 4);
+void PinReleaseOwner(uint8_t ownerBit, bool writeBack) {
+    for (size_t i = 0; i < g_pins.size();) {
+        Pin& pin = g_pins[i];
+        if (!(pin.owner & ownerBit)) { ++i; continue; }
+        pin.owner = (uint8_t)(pin.owner & ~ownerBit);
+        if (pin.owner == 0) {
+            if (writeBack) Mem::WriteRaw(Mem::Pid(), pin.addr, pin.orig, pin.size);
+            g_pins.erase(g_pins.begin() + (long)i);
+        } else {
+            ++i;
+        }
     }
-    g_pinRestore.clear();
 }
 
 void PinRecoilOn(uintptr_t model) {
-    // RecoilModel on client model: nominal offset in client tree
+    // [unverified | model + 0x58 -> recoil model, value at +0x18 as Vec3]
+    // Guessed layout: PinApply refuses the write unless the three floats read
+    // back plausible, so a wrong offset costs a skipped feature, not a crash.
     if (!Mem::IsValidPtr(model)) return;
-    uintptr_t rc = Mem::ReadPtr(model + 0x58); // nominal recoil slot
-    if (Mem::IsValidPtr(rc)) PinZero(rc + 0x18, 12);
+    uintptr_t rc = Mem::ReadPtr(model + 0x58);
+    if (Mem::IsValidPtr(rc)) PinApply(rc + 0x18, 12, 0x01);
 }
 
 void PinSpreadOn(uintptr_t model) {
+    // [unverified | model + 0x60 -> spread model, four floats from +0x18]
     if (!Mem::IsValidPtr(model)) return;
     uintptr_t sp = Mem::ReadPtr(model + 0x60);
-    if (Mem::IsValidPtr(sp)) {
-        PinZero(sp + 0x18, 4);
-        PinZero(sp + 0x1C, 4);
-        PinZero(sp + 0x20, 4);
-        PinZero(sp + 0x24, 4);
-    }
+    if (Mem::IsValidPtr(sp)) PinApply(sp + 0x18, 16, 0x02);
 }
 
 void PinSwayOn(uintptr_t model) {
+    // [unverified | model + 0x68 -> sway model, two floats from +0x18]
     if (!Mem::IsValidPtr(model)) return;
     uintptr_t sw = Mem::ReadPtr(model + 0x68);
-    if (Mem::IsValidPtr(sw)) {
-        PinZero(sw + 0x18, 4);
-        PinZero(sw + 0x1C, 4);
-    }
+    if (Mem::IsValidPtr(sw)) PinApply(sw + 0x18, 8, 0x04);
+}
+
+// Prune position memory so a long session doesn't grow it without bound.
+void PrunePosMem() {
+    if (g_posMem.size() <= 512) return;
+    g_posMem.clear();
 }
 
 // ==========================================================================
@@ -1295,7 +1417,11 @@ void Game::Update() {
         GatherCharacters(p);
         std::lock_guard<std::mutex> g(g_playerMutex);
         g_players = std::move(p);
+    } else {
+        std::lock_guard<std::mutex> g(g_playerMutex);
+        RefreshSnapshot(g_players);
     }
+    PrunePosMem();
     if (now - g_lastLootGather > std::chrono::milliseconds(600)) {
         g_lastLootGather = now;
         std::vector<LootItem>  l;
@@ -1319,13 +1445,42 @@ void Game::StartScanner() {
 void Game::StopScanner() {
     g_scanRunning = false;
     if (g_scanThread.joinable()) g_scanThread.join();
-    RestoreAll();
+    ReleaseGun();
 }
 
 HWND Game::GameWindow() { return g_hwnd; }
 int  Game::ScreenW()    { return g_scrW; }
 int  Game::ScreenH()    { return g_scrH; }
 void Game::RefreshWindow() { RefreshWindowImpl(); }
+
+void Game::ScreenCenter(float& cx, float& cy) {
+    // Client-space centre. Projection works in client space, so every aim and
+    // crosshair calculation has to read its centre from the same rectangle.
+    cx = (float)g_scrW * 0.5f;
+    cy = (float)g_scrH * 0.5f;
+}
+
+bool Game::IsForeground() {
+    if (!g_hwnd) return false;
+    HWND fg = GetForegroundWindow();
+    return fg == g_hwnd;
+}
+
+Game::Health Game::Diagnostics() {
+    Health h;
+    h.rootsValid  = g_rootsValid.load();
+    h.cameraValid = GetCameraForUse().valid;
+    const uintptr_t* k = (const uintptr_t*)&g_k;
+    h.klassTotal = (int)(sizeof(Klasses) / sizeof(uintptr_t));
+    for (int i = 0; i < h.klassTotal; ++i) if (k[i]) h.klassFound++;
+    h.klassGated = (int)g_klassGated.size();
+    {
+        std::lock_guard<std::mutex> g(g_playerMutex);
+        h.players = (int)g_players.size();
+    }
+    h.tpRejects = g_tpRejectTotal;
+    return h;
+}
 
 Cam  Game::Camera() { return GetCameraForUse(); }
 
@@ -1357,14 +1512,47 @@ void Game::BeginTeleport(TpKind k, uint32_t entityId, const Vec3& point, bool fl
     g_tp.fly = fly;
     g_tp.flyVel = Vec3();
     g_tp.active = (k != TpKind::None);
+    g_tpRejectRun = 0;
+    g_tpHaveLastWrite = false;
 }
 
-void Game::CancelTeleport() { g_tp.active = false; g_tp.kind = TpKind::None; }
+void Game::CancelTeleport() {
+    g_tp.active = false;
+    g_tp.kind = TpKind::None;
+    g_tpRejectRun = 0;
+    g_tpHaveLastWrite = false;
+}
+
+bool Game::TeleportRejected()    { return g_tpRejectRun >= kTpRejectLimit; }
+int  Game::TeleportRejectCount() { return g_tpRejectTotal; }
 
 void Game::ApplyTeleport(bool steer) {
     if (!g_tp.active) return;
     uintptr_t local = LocalModel();
     if (!local) return;
+
+    // A write that the server does not accept is pulled back within a tick or
+    // two. Compare where we asked to be against where we actually are, and if
+    // the position keeps reverting, say so once and stop fighting it.
+    if (g_tpHaveLastWrite && g_tp.kind != TpKind::PullEntity) {
+        Vec3 now;
+        if (ReadPosition(local, now)) {
+            const float drift = Game::Distance3D(now, g_tpLastWrite);
+            if (drift > kTpRejectDistance) {
+                if (++g_tpRejectRun == kTpRejectLimit) {
+                    g_tpRejectTotal++;
+                    Console::Warn("teleport reverted %d frames running (%.1fm), server is authoritative here",
+                                  g_tpRejectRun, drift);
+                    g_tp.active = false;
+                    g_tp.kind = TpKind::None;
+                    g_tpHaveLastWrite = false;
+                    return;
+                }
+            } else if (g_tpRejectRun) {
+                g_tpRejectRun = 0;
+            }
+        }
+    }
 
     std::vector<Player> snap;
     SnapshotPlayers(snap);
@@ -1374,6 +1562,8 @@ void Game::ApplyTeleport(bool steer) {
             if (p.entityId != g_tp.entityId) continue;
             if (g_tp.kind == TpKind::ToEntity) {
                 WriteModelPos(local, p.root);
+                g_tpLastWrite = p.root;
+                g_tpHaveLastWrite = true;
             } else {
                 Cam c = GetCameraForUse();
                 WriteModelPos(p.model, c.valid ? c.pos : p.root);
@@ -1383,8 +1573,11 @@ void Game::ApplyTeleport(bool steer) {
     } else if (g_tp.kind == TpKind::ToPoint) {
         Vec3 pt = g_tp.point;
         if (steer) SteerFly(pt);
+        if (!InWorld(pt)) { g_tp.active = false; return; }
         g_tp.point = pt;
         WriteModelPos(local, pt);
+        g_tpLastWrite = pt;
+        g_tpHaveLastWrite = true;
     }
 }
 
@@ -1394,43 +1587,124 @@ void Game::ReinforceTeleport() {
 }
 
 void Game::ApplyGun(const GunToggles& t) {
-    uintptr_t local = LocalModel();
-    if (!local) {
-        if (!t.noRecoil && !t.noSpread && !t.noSway && !g_pinRestore.empty()) RestoreAll();
-        g_gunState = t;
-        return;
-    }
-    if (t.noRecoil) PinRecoilOn(local); else if (g_gunState.noRecoil) RestoreAll();
-    if (t.noSpread) PinSpreadOn(local);
-    if (t.noSway)   PinSwayOn(local);
+    // Records intent only. TickGun does the work every frame so a pin survives
+    // a respawn, a weapon swap and the game writing the field back.
     g_gunState = t;
+    TickGun();
 }
 
+void Game::TickGun() {
+    const GunToggles t = g_gunState;
+    uintptr_t local = LocalModel();
+
+    if (!local) {
+        // The model is gone. Its pin addresses may already be reused, so the
+        // records are dropped without writing anything back.
+        if (!g_pins.empty()) g_pins.clear();
+        g_pinModel = 0;
+        return;
+    }
+    if (local != g_pinModel) {
+        if (g_pinModel) g_pins.clear();   // same reason: old object is dead
+        g_pinModel = local;
+    }
+
+    // Features switched off give their bytes back while the model is still live.
+    if (!t.noRecoil) PinReleaseOwner(0x01, true);
+    if (!t.noSpread) PinReleaseOwner(0x02, true);
+    if (!t.noSway)   PinReleaseOwner(0x04, true);
+
+    if (t.noRecoil) PinRecoilOn(local);
+    if (t.noSpread) PinSpreadOn(local);
+    if (t.noSway)   PinSwayOn(local);
+}
+
+void Game::ReleaseGun() {
+    if (g_pins.empty()) return;
+    const bool alive = Mem::IsConnected() && g_pinModel && LocalModel() == g_pinModel;
+    PinReleaseOwner(0x01, alive);
+    PinReleaseOwner(0x02, alive);
+    PinReleaseOwner(0x04, alive);
+    g_pins.clear();
+    g_pinModel = 0;
+}
+
+// --------------------------------------------------------------------------
+// Sensitivity
+//
+// The old path multiplied a pixel delta by countsPerDegree/10, which mixes two
+// different units and leaves a magic constant in the aim loop. The aim path now
+// works in degrees end to end: the error to the target is an angle, the mouse
+// takes counts, and counts-per-degree is the single conversion between them.
+//
+// Counts-per-degree is measured from real moves by least squares. Until enough
+// samples land it is estimated from vertical FOV and client height, which is a
+// linearisation about screen centre, not a measurement.
+// --------------------------------------------------------------------------
+namespace {
+
+constexpr float kDeg = 57.295779513f;      // 180/pi
+constexpr int   kSensMinSamples = 8;
+constexpr size_t kSensMaxSamples = 48;
+
+float EstimateCountsPerDeg() {
+    Cam c = GetCameraForUse();
+    const float fov = (c.valid && c.fov > 20.0f && c.fov < 170.0f) ? c.fov : offsets::camera_fov_degrees;
+    const int   h   = g_scrH > 0 ? g_scrH : 1080;
+    const float tanHalf = std::tan(fov * 0.5f / kDeg);
+    if (tanHalf < 1e-4f) return 10.0f;
+    return ((float)h * 0.5f / tanHalf) / kDeg;   // pixels per degree at centre
+}
+
+float ClampCpd(float v) {
+    const float a = std::fabs(v);
+    if (!std::isfinite(v) || a < 0.5f || a > 2000.0f) return 0.0f;
+    return v;
+}
+
+} // namespace
+
 void Game::ObserveAimTurn(const Vec3& fwd) {
-    float yaw   = std::atan2(fwd.x, fwd.z);
-    float pitch = std::asin(std::clamp(fwd.y, -1.0f, 1.0f));
+    float yaw   = std::atan2(fwd.x, fwd.z) * kDeg;
+    float pitch = std::asin(std::clamp(fwd.y, -1.0f, 1.0f)) * kDeg;
     if (!g_sensHaveLast) {
         g_lastYaw = yaw;
         g_lastPitch = pitch;
         g_sensHaveLast = true;
+        g_lastAimDx = g_lastAimDy = 0.0f;
         return;
     }
     float dyaw   = yaw - g_lastYaw;
     float dpitch = pitch - g_lastPitch;
-    if (dyaw >  3.14159f) dyaw -= 6.2831853f;
-    if (dyaw < -3.14159f) dyaw += 6.2831853f;
-    if (std::fabs(g_lastAimDx) > 1.0f || std::fabs(g_lastAimDy) > 1.0f) {
-        SensSample s{ (double)dyaw * (180.0 / 3.14159265), (double)dpitch * (180.0 / 3.14159265), g_lastAimDx, g_lastAimDy };
-        g_sensSamples.push_back(s);
-        if (g_sensSamples.size() > 32) g_sensSamples.erase(g_sensSamples.begin());
-        if (g_sensSamples.size() >= 6) {
+    if (dyaw >  180.0f) dyaw -= 360.0f;
+    if (dyaw < -180.0f) dyaw += 360.0f;
+
+    const bool moved = std::fabs(g_lastAimDx) > 1.0f || std::fabs(g_lastAimDy) > 1.0f;
+    // A respawn, a cut or a teleport swings the camera far further than one
+    // mouse step could have. Those frames are not evidence about sensitivity.
+    const bool sane = std::fabs(dyaw) < 25.0f && std::fabs(dpitch) < 25.0f;
+
+    if (moved && sane) {
+        SensSample smp{ (double)dyaw, (double)dpitch, g_lastAimDx, g_lastAimDy };
+        bool keep = true;
+        if (g_cpdX > 0.0f && std::fabs(dyaw) > 0.05) {
+            const double implied = std::fabs(smp.mx / dyaw);
+            const double ratio   = implied / (double)g_cpdX;
+            if (ratio < 0.25 || ratio > 4.0) keep = false;    // outlier
+        }
+        if (keep) {
+            g_sensSamples.push_back(smp);
+            if (g_sensSamples.size() > kSensMaxSamples)
+                g_sensSamples.erase(g_sensSamples.begin());
+        }
+        if (g_sensSamples.size() >= (size_t)kSensMinSamples) {
             double sxy = 0, sx2 = 0, syy = 0, sy2 = 0;
             for (auto& ss : g_sensSamples) {
                 if (std::fabs(ss.dxRot) > 0.05) { sxy += ss.mx * ss.dxRot; sx2 += ss.dxRot * ss.dxRot; }
                 if (std::fabs(ss.dyRot) > 0.05) { syy += ss.my * ss.dyRot; sy2 += ss.dyRot * ss.dyRot; }
             }
-            if (sx2 > 0.001) g_cpdX = (float)(sxy / sx2);
-            if (sy2 > 0.001) g_cpdY = (float)(syy / sy2);
+            if (sx2 > 0.001) g_cpdX = ClampCpd((float)(sxy / sx2));
+            if (sy2 > 0.001) g_cpdY = ClampCpd((float)(syy / sy2));
         }
     }
     g_lastYaw = yaw;
@@ -1443,9 +1717,61 @@ void Game::ReportAimMove(float dx, float dy) {
     g_lastAimDy = dy;
 }
 
+bool Game::SensCalibrated() {
+    return std::fabs(g_cpdX) > 0.5f && std::fabs(g_cpdY) > 0.5f &&
+           g_sensSamples.size() >= (size_t)kSensMinSamples;
+}
+
+void Game::SensCountsPerDeg(float& x, float& y) {
+    if (SensCalibrated()) { x = g_cpdX; y = g_cpdY; return; }
+    const float est = EstimateCountsPerDeg();
+    x =  est;
+    y = -est;      // screen y grows downward, pitch grows upward
+}
+
+int Game::SensSampleCount() { return (int)g_sensSamples.size(); }
+
+void Game::ResetSensCalibration() {
+    g_sensSamples.clear();
+    g_cpdX = g_cpdY = 0.0f;
+    g_sensHaveLast = false;
+}
+
+bool Game::AimDeltaDegrees(const Vec3& target, float& dYawDeg, float& dPitchDeg) {
+    dYawDeg = dPitchDeg = 0.0f;
+    Cam c = GetCameraForUse();
+    if (!c.valid) return false;
+    Vec3 d = Sub(target, c.pos);
+    if (!IsFiniteVec(d)) return false;
+    const float len = Length(d);
+    if (len < 1e-3f) return false;
+    d = Mul(d, 1.0f / len);
+    // Angles are taken against the camera basis, so this holds for a target
+    // behind the player or off the edge of the screen, where projection fails.
+    const float yawT   = std::atan2(d.x, d.z) * kDeg;
+    const float yawC   = std::atan2(c.fwd.x, c.fwd.z) * kDeg;
+    const float pitchT = std::asin(std::clamp(d.y,     -1.0f, 1.0f)) * kDeg;
+    const float pitchC = std::asin(std::clamp(c.fwd.y, -1.0f, 1.0f)) * kDeg;
+    float dy = yawT - yawC;
+    if (dy >  180.0f) dy -= 360.0f;
+    if (dy < -180.0f) dy += 360.0f;
+    dYawDeg   = dy;
+    dPitchDeg = pitchT - pitchC;
+    return true;
+}
+
+void Game::AnglesToCounts(float dYawDeg, float dPitchDeg, float& mx, float& my) {
+    float cx = 0, cy = 0;
+    SensCountsPerDeg(cx, cy);
+    mx = dYawDeg   * cx;
+    my = dPitchDeg * cy;
+}
+
 void Game::ScaleAimMove(float& mx, float& my) {
-    if (g_cpdX > 1.0f) mx *= (g_cpdX / 10.0f);
-    if (std::fabs(g_cpdY) > 1.0f) my *= (g_cpdY / 10.0f);
+    // Legacy pixel path. Pixels are already the right unit for a 1:1 mouse, and
+    // the calibrated conversion now lives in AnglesToCounts, so this no longer
+    // folds counts-per-degree into a pixel delta.
+    (void)mx; (void)my;
 }
 
 float Game::Distance3D(const Vec3& a, const Vec3& b) {
@@ -1460,6 +1786,10 @@ static bool WriteCameraBasisTo(const Vec3& target) {
     Vec3 pos = ReadVec3(cam + offsets::battle_camera_model::position);
     if (!InWorld(pos)) return false;
     Vec3 fwd = Normalize(Sub(target, pos));
+    if (!Unitish(fwd)) return false;
+    // Keep the basis out of the gimbal: a near-vertical forward makes right and
+    // up degenerate and the view snaps.
+    if (std::fabs(fwd.y) > 0.9995f) return false;
     Vec3 worldUp(0, 1, 0);
     Vec3 right;
     // right = normalize(cross(worldUp, fwd))

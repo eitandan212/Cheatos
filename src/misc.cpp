@@ -5,6 +5,7 @@
 #include "events.h"
 
 #include <windows.h>
+#include <algorithm>
 #include <chrono>
 
 namespace {
@@ -61,7 +62,10 @@ void StepBhop() {
 }
 
 void StepFastDuck() {
-    if (!g_cfg.fastDuck) return;
+    if (!g_cfg.fastDuck) {
+        if (g_duckState) { SendKey(VK_LCONTROL, false); g_duckState = false; }
+        return;
+    }
     double period = 1.0 / (double)std::max(1, g_cfg.fastDuckHz);
     double now = NowSec();
     if (now - g_lastDuckEdge < period * 0.5) return;
@@ -131,7 +135,24 @@ void StepSavedSlots() {
 
 Misc::Settings& Misc::Cfg() { return g_cfg; }
 
+void Misc::ReleaseAll() {
+    if (g_bhopKeyDown) { SendKey(g_cfg.bhopKey, false); g_bhopKeyDown = false; }
+    if (g_duckState)   { SendKey(VK_LCONTROL,   false); g_duckState   = false; }
+    g_airstuckHeld = false;
+}
+
 void Misc::Update() {
+    // Memory-side work is safe with the game in the background; synthetic key
+    // events are not, they would land in whatever window has focus.
+    const bool focused = Game::IsForeground();
+    if (g_cfg.pauseUnfocused && !focused) {
+        ReleaseAll();
+        Game::TickGun();
+        StepThirdPerson();
+        StepFov();
+        return;
+    }
+
     StepBhop();
     StepFastDuck();
     StepFakeDuck();
@@ -139,4 +160,5 @@ void Misc::Update() {
     StepThirdPerson();
     StepFov();
     StepSavedSlots();
+    Game::TickGun();
 }

@@ -104,8 +104,14 @@ void DrawTargetInfoCard(ImDrawList* dl) {
     // Pick the closest alive non-local on screen — same selection ESP
     // would highlight, but we do our own small pass so Aimbot state
     // doesn't need exposing.
-    float cx = (float)Overlay::Width() * 0.5f;
-    float cy = (float)Overlay::Height() * 0.5f;
+    // Target selection compares against projected points, so the centre comes
+    // from the client rectangle the projection uses.
+    float cx = 0, cy = 0;
+    Game::ScreenCenter(cx, cy);
+    if (cx < 1.0f || cy < 1.0f) {
+        cx = (float)Overlay::Width()  * 0.5f;
+        cy = (float)Overlay::Height() * 0.5f;
+    }
     float best = 1e9f;
     for (auto& p : players) {
         if (p.isLocalPlayer || !p.alive) continue;

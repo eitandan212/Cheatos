@@ -26,7 +26,7 @@ int  g_section = 0;
 
 struct SavedBlob {
     uint32_t magic = 0x4B4F4C52; // 'RLOK'
-    uint32_t version = 3;
+    uint32_t version = 4;
     ESP::Settings     esp;
     Aimbot::Settings  aim;
     Aimbot::Trigger   trig;
@@ -271,6 +271,29 @@ void SecAim() {
     ImGui::Checkbox("Recoil control",     &a.rcs);
     ImGui::SliderFloat("Strength",        &a.rcsStrength, 0.0f, 1.5f);
     EndCard();
+
+    BeginCard("SENSITIVITY");
+    {
+        float cpx = 0, cpy = 0;
+        Game::SensCountsPerDeg(cpx, cpy);
+        const bool cal = Game::SensCalibrated();
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), cal ? "measured" : "estimated from FOV");
+        StatRow("Source", buf);
+        std::snprintf(buf, sizeof(buf), "%.2f / %.2f", cpx, cpy);
+        StatRow("Counts per degree", buf);
+        std::snprintf(buf, sizeof(buf), "%d", Game::SensSampleCount());
+        StatRow("Samples", buf);
+    }
+    ImGui::SliderFloat("Trim",            &a.sensScale, 0.1f, 3.0f);
+    ImGui::SliderFloat("Max counts/frame",&a.maxCounts, 10.0f, 1000.0f, "%.0f");
+    ImGui::Checkbox("Require game focus", &a.requireFocus);
+    ImGui::SliderInt ("Auto-fire gap (ms)", &a.autoFireMs, 10, 500);
+    if (AccentButton("Reset calibration")) {
+        Game::ResetSensCalibration();
+        Console::Log("sensitivity calibration cleared");
+    }
+    EndCard();
 }
 
 void SecTrigger() {
@@ -459,22 +482,34 @@ void SecMisc() {
     EndCard();
 
     BeginCard("GUN MODS");
-    static Game::GunToggles gun;
     bool ch = false;
-    ch |= ImGui::Checkbox("No recoil",    &gun.noRecoil);
-    ch |= ImGui::Checkbox("No spread",    &gun.noSpread);
-    ch |= ImGui::Checkbox("No sway",      &gun.noSway);
-    if (ch) Game::ApplyGun(gun);
+    ch |= ImGui::Checkbox("No recoil",    &m.gun.noRecoil);
+    ch |= ImGui::Checkbox("No spread",    &m.gun.noSpread);
+    ch |= ImGui::Checkbox("No sway",      &m.gun.noSway);
+    if (ch) Game::ApplyGun(m.gun);
+    ImGui::Checkbox("Pause input when unfocused", &m.pauseUnfocused);
     EndCard();
 
     BeginCard("PROBE");
-    char buf[48];
-    std::snprintf(buf, 48, "%.1f deg", Game::Camera().fov);
-    StatRow("Camera FOV",   buf);
-    std::snprintf(buf, 48, "%dx%d", Overlay::Width(), Overlay::Height());
-    StatRow("Screen",       buf);
-    Cam c = Game::Camera();
-    StatRow("Status",       c.valid ? "ok" : "no camera");
+    {
+        char buf[64];
+        Game::Health h = Game::Diagnostics();
+        std::snprintf(buf, sizeof(buf), "%.1f deg", Game::Camera().fov);
+        StatRow("Camera FOV",   buf);
+        std::snprintf(buf, sizeof(buf), "%dx%d client / %dx%d overlay",
+                      Game::ScreenW(), Game::ScreenH(), Overlay::Width(), Overlay::Height());
+        StatRow("Screen",       buf);
+        StatRow("Roots",        h.rootsValid ? "valid" : "searching");
+        StatRow("Camera",       h.cameraValid ? "ok" : "no camera");
+        std::snprintf(buf, sizeof(buf), "%d/%d resolved, %d gated",
+                      h.klassFound, h.klassTotal, h.klassGated);
+        StatRow("Klasses",      buf);
+        std::snprintf(buf, sizeof(buf), "%d", h.players);
+        StatRow("Entities",     buf);
+        std::snprintf(buf, sizeof(buf), "%d", h.tpRejects);
+        StatRow("TP rejected",  buf);
+        StatRow("Focus",        Game::IsForeground() ? "game" : "elsewhere");
+    }
     EndCard();
 }
 
@@ -622,7 +657,7 @@ void SecSettings() {
         std::vector<uint8_t> raw;
         if (Clip::Base64Decode(txt, raw) && raw.size() == sizeof(SavedBlob)) {
             SavedBlob b; std::memcpy(&b, raw.data(), sizeof(b));
-            if (b.magic == 0x4B4F4C52 && b.version == 3) {
+            if (b.magic == 0x4B4F4C52 && b.version == 4) {
                 ESP::Cfg()        = b.esp;
                 Aimbot::Cfg()     = b.aim;
                 Aimbot::TrigCfg() = b.trig;

@@ -233,7 +233,7 @@ struct TypeInfoSet {
 // Populate with real RVAs dumped from the current ROB RUN build to shortcut
 // klass resolution; empty by default so ScanKlassNames carries the load.
 constexpr TypeInfoSet type_info_sets[1] = {
-    { 0 }
+    {}      // every field zero: no RVA set is known for any build yet
 };
 
 // GameObjectManager (UnityPlayer.dll RVA)

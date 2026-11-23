@@ -51,6 +51,16 @@ uint32_t RarityColor(int r) {
     }
 }
 
+// Everything that has to line up with projected world points reads its centre
+// here, so there is one definition of "middle of the screen" in the overlay.
+void Centre(float& cx, float& cy) {
+    Game::ScreenCenter(cx, cy);
+    if (cx < 1.0f || cy < 1.0f) {
+        cx = (float)Overlay::Width()  * 0.5f;
+        cy = (float)Overlay::Height() * 0.5f;
+    }
+}
+
 void DrawShadowText(ImDrawList* dl, ImVec2 p, uint32_t col, const char* txt) {
     dl->AddText(ImVec2(p.x + 1, p.y + 1), IM_COL32(0, 0, 0, 220), txt);
     dl->AddText(p, col, txt);
@@ -160,7 +170,7 @@ void DrawRadar(ImDrawList* dl, const std::vector<Player>& players, const std::ve
     dl->AddCircle      (ImVec2(cx, cy), size * 0.5f, IM_COL32(0x4C, 0xE0, 0xD9, 220), 48, 1.5f);
     dl->AddLine(ImVec2(cx - size*0.5f, cy), ImVec2(cx + size*0.5f, cy), IM_COL32(0x2A, 0x31, 0x3D, 160), 1.0f);
     dl->AddLine(ImVec2(cx, cy - size*0.5f), ImVec2(cx, cy + size*0.5f), IM_COL32(0x2A, 0x31, 0x3D, 160), 1.0f);
-    float yaw = (g_cfg.radarLock == RadarLock::CameraYaw) ? std::atan2(c.fwd.x, c.fwd.z) : 0.0f;
+    float yaw = (g_cfg.radarLock == ESP::RadarLock::CameraYaw) ? std::atan2(c.fwd.x, c.fwd.z) : 0.0f;
     float ca = std::cos(-yaw), sa = std::sin(-yaw);
     float sc = size / (g_cfg.radarRange * 2.0f);
     auto plot = [&](const Vec3& pos, uint32_t col, float rad) {
@@ -175,7 +185,7 @@ void DrawRadar(ImDrawList* dl, const std::vector<Player>& players, const std::ve
     };
     // camera indicator: rotated when radar is north-locked
     {
-        float ia = (g_cfg.radarLock == RadarLock::WorldNorth) ? std::atan2(c.fwd.x, c.fwd.z) : 0.0f;
+        float ia = (g_cfg.radarLock == ESP::RadarLock::WorldNorth) ? std::atan2(c.fwd.x, c.fwd.z) : 0.0f;
         float ix = -std::sin(ia), iy = -std::cos(ia);
         dl->AddLine(ImVec2(cx, cy), ImVec2(cx + ix * 12.0f, cy + iy * 12.0f), IM_COL32(0x7C,0xF7,0xF0,230), 1.5f);
     }
@@ -193,10 +203,10 @@ void DrawRadar(ImDrawList* dl, const std::vector<Player>& players, const std::ve
 void DrawFar(ImDrawList* dl, const Vec3& w, uint32_t col) {
     float s[2]; float depth = 0;
     if (!Game::Project(w, s, &depth)) return;
-    float W = (float)Overlay::Width();
-    float H = (float)Overlay::Height();
-    float cx = W * 0.5f;
-    float cy = H * 0.5f;
+    float cx = 0, cy = 0;
+    Centre(cx, cy);
+    const float W = cx * 2.0f;
+    const float H = cy * 2.0f;
     if (g_cfg.offscreenChevron) {
         float dx = s[0] - cx;
         float dy = s[1] - cy;
@@ -260,8 +270,8 @@ void DrawMark(ImDrawList* dl, const WorldMark& m) {
 }
 
 void DrawCrosshair(ImDrawList* dl) {
-    float cx = (float)Overlay::Width() * 0.5f;
-    float cy = (float)Overlay::Height() * 0.5f;
+    float cx = 0, cy = 0;
+    Centre(cx, cy);
     const ImU32 col = IM_COL32(0x4C, 0xE0, 0xD9, 230);
     float sz = g_cfg.crosshairSize;
     float gap = g_cfg.crosshairGap;
@@ -339,8 +349,8 @@ void ESP::Render() {
 
     auto& aim = Aimbot::Cfg();
     if (aim.mode != Aimbot::Mode::Off && aim.drawFov) {
-        float cx = (float)Overlay::Width() * 0.5f;
-        float cy = (float)Overlay::Height() * 0.5f;
+        float cx = 0, cy = 0;
+        Centre(cx, cy);
         bool aiming = (GetAsyncKeyState(aim.keyVk) & 0x8000) != 0;
         ImU32 ring = aiming ? IM_COL32(0x7C, 0xF7, 0xF0, 230)
                             : IM_COL32(0x4C, 0xE0, 0xD9, 110);
@@ -386,8 +396,10 @@ void ESP::Render() {
             }
 
             if (g_cfg.snapline) {
-                float sx = (float)Overlay::Width() * 0.5f;
-                float sy = (float)Overlay::Height();
+                float scx = 0, scy = 0;
+                Centre(scx, scy);
+                const float sx = scx;
+                const float sy = scy * 2.0f;
                 dl->AddLine(ImVec2(sx, sy), ImVec2(cx, botY), col, 1.0f);
             }
 

@@ -245,26 +245,37 @@ void Overlay::EndFrame() {
 
 void Overlay::MatchWindow(HWND game) {
     if (!game || !g_hwnd) return;
-    RECT rc;
-    if (!GetWindowRect(game, &rc)) return;
-    int w = rc.right - rc.left;
-    int h = rc.bottom - rc.top;
+    // Track the CLIENT rectangle, not the window rectangle. World-to-screen
+    // projects into client space, so an overlay sized to the window would be
+    // offset by the border and title bar in windowed mode and every drawn
+    // point, including the aim centre, would sit wrong by that much.
+    RECT cr;
+    if (!GetClientRect(game, &cr)) return;
+    POINT tl{ cr.left, cr.top };
+    if (!ClientToScreen(game, &tl)) return;
+    const int w = cr.right - cr.left;
+    const int h = cr.bottom - cr.top;
     if (w <= 0 || h <= 0) return;
     if (w != g_w || h != g_h) {
         g_w = w; g_h = h;
         CreateDib(w, h);
         CreateRtForSize(w, h);
     }
-    SetWindowPos(g_hwnd, HWND_TOPMOST, rc.left, rc.top, w, h,
-                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    static POINT s_last{ MAXLONG, MAXLONG };
+    static int   s_lastW = 0, s_lastH = 0;
+    if (tl.x != s_last.x || tl.y != s_last.y || w != s_lastW || h != s_lastH) {
+        s_last = tl; s_lastW = w; s_lastH = h;
+        SetWindowPos(g_hwnd, HWND_TOPMOST, tl.x, tl.y, w, h,
+                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    }
 }
 
 void Overlay::SetClickThrough(bool through) {
     if (!g_hwnd) return;
-    LONG ex = GetWindowLongW(g_hwnd, GWL_EXSTYLE);
-    if (through) ex |= WS_EX_TRANSPARENT;
-    else         ex &= ~WS_EX_TRANSPARENT;
-    SetWindowLongW(g_hwnd, GWL_EXSTYLE, ex);
+    const LONG ex  = GetWindowLongW(g_hwnd, GWL_EXSTYLE);
+    const LONG want = through ? (ex | WS_EX_TRANSPARENT) : (ex & ~WS_EX_TRANSPARENT);
+    if (want == ex) return;                 // called twice a frame, only act on change
+    SetWindowLongW(g_hwnd, GWL_EXSTYLE, want);
 }
 
 extern "C" ID3D11Device*        Overlay_GetDevice()  { return g_dev; }

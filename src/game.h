@@ -84,6 +84,8 @@ HWND  GameWindow();
 int   ScreenW();
 int   ScreenH();
 void  RefreshWindow();
+void  ScreenCenter(float& cx, float& cy);   // client-space center, projection-consistent
+bool  IsForeground();                        // game window owns input focus
 
 // -------- camera --------
 Cam   Camera();
@@ -105,6 +107,8 @@ void  BeginTeleport(TpKind k, uint32_t entityId, const Vec3& point, bool fly = f
 void  CancelTeleport();
 void  ApplyTeleport(bool steer);
 void  ReinforceTeleport();
+bool  TeleportRejected();        // server pulled the position back
+int   TeleportRejectCount();
 
 // -------- aim (memory path) --------
 bool  MemoryAim(const Vec3& worldTarget);
@@ -125,10 +129,35 @@ struct GunToggles {
 };
 void  ApplyGun(const GunToggles& t);
 
-// -------- sensitivity --------
+// -------- gun pin ticking --------
+void  TickGun();                 // re-applies active pins on the live model each frame
+void  ReleaseGun();              // restores every pin still owned by a live model
+
+// -------- sensitivity / aim conversion --------
+// The regression learns mouse counts per degree of camera rotation from real
+// moves. Until it has enough samples the estimate is derived from FOV and
+// client height, which is a linearisation about screen centre, not a measurement.
+bool  SensCalibrated();
+void  SensCountsPerDeg(float& x, float& y);
+int   SensSampleCount();
+void  ResetSensCalibration();
+bool  AimDeltaDegrees(const Vec3& target, float& dYawDeg, float& dPitchDeg);
+void  AnglesToCounts(float dYawDeg, float dPitchDeg, float& mx, float& my);
 void  ObserveAimTurn(const Vec3& fwd);
 void  ReportAimMove(float dx, float dy);
-void  ScaleAimMove(float& mx, float& my);
+void  ScaleAimMove(float& mx, float& my);    // legacy pixel path, calibration-free
+
+// -------- diagnostics --------
+struct Health {
+    bool  rootsValid   = false;
+    bool  cameraValid  = false;
+    int   klassFound   = 0;
+    int   klassTotal   = 0;
+    int   klassGated   = 0;      // names given up on after repeated sweeps
+    int   players      = 0;
+    int   tpRejects    = 0;
+};
+Health Diagnostics();
 
 // -------- misc --------
 float Distance3D(const Vec3& a, const Vec3& b);

@@ -91,7 +91,14 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 
         AppState::PollPanic();
         Game::Update();
-        if (!AppState::Cfg().panicActive) Misc::Update();
+        if (!AppState::Cfg().panicActive) {
+            Misc::Update();
+        } else {
+            // Panic must leave the process as it found it: give back every
+            // pinned byte and let go of any key being held.
+            Game::ReleaseGun();
+            Misc::ReleaseAll();
+        }
 
         if (!Overlay::BeginFrame()) break;  // WM_QUIT only
         ESP::Render();
@@ -109,9 +116,10 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
         Overlay::EndFrame();
     }
 
+    Misc::ReleaseAll();
     Portrait::Shutdown();
     Overlay::Shutdown();
-    Game::StopScanner();
+    Game::StopScanner();      // restores gun pins while the process is still open
     Mem::Shutdown();
     Console::Log("exit clean");
     Console::Shutdown();

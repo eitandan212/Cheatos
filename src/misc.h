@@ -2,6 +2,8 @@
 
 #include <cstdint>
 
+#include "game.h"
+
 namespace Misc {
 
 struct SlotKey {
@@ -30,12 +32,20 @@ struct Settings {
     bool  fovOverride     = false;
     float fovDeg          = 90.0f;
 
+    // gun pins — live here so they persist with the profile and so the pin
+    // ticker can re-apply them without the menu being open.
+    Game::GunToggles gun;
+
+    // Stop emitting synthetic input while another window has focus.
+    bool  pauseUnfocused  = true;
+
     // info
     bool  showFps         = true;
     char  watermarkText[32] = "loko.gg";
 };
 
 Settings& Cfg();
-void Update();   // called every frame after Game::Update()
+void Update();       // called every frame after Game::Update()
+void ReleaseAll();   // release every key this module is holding down
 
 } // namespace Misc
