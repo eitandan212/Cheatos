@@ -17,19 +17,22 @@ namespace {
 ESP::Settings g_cfg;
 
 uint32_t HealthColor(int hp, int maxHp) {
+    // klar-brand ramp: coral (low) -> amber (mid) -> mint (high)
     if (maxHp <= 0) maxHp = 100;
     float f = (float)std::clamp(hp, 0, maxHp) / (float)maxHp;
+    auto lerp = [](int a, int b, float t) { return (int)(a + (b - a) * t); };
     int r, g, b;
     if (f >= 0.5f) {
         float t = (f - 0.5f) * 2.0f;
-        r = (int)((1.0f - t) * 255);
-        g = 255;
+        r = lerp(0xE6, 0x55, t);
+        g = lerp(0xB0, 0xE3, t);
+        b = lerp(0x4A, 0x9A, t);
     } else {
         float t = f * 2.0f;
-        r = 255;
-        g = (int)(t * 255);
+        r = lerp(0xE3, 0xE6, t);
+        g = lerp(0x4D, 0xB0, t);
+        b = lerp(0x5C, 0x4A, t);
     }
-    b = 0;
     return IM_COL32(r, g, b, 255);
 }
 
@@ -219,14 +222,30 @@ void DrawMark(ImDrawList* dl, const WorldMark& m) {
 void DrawCrosshair(ImDrawList* dl) {
     float cx = (float)Overlay::Width() * 0.5f;
     float cy = (float)Overlay::Height() * 0.5f;
-    dl->AddLine(ImVec2(cx - 6, cy), ImVec2(cx + 6, cy), IM_COL32(255, 60, 60, 220), 1.5f);
-    dl->AddLine(ImVec2(cx, cy - 6), ImVec2(cx, cy + 6), IM_COL32(255, 60, 60, 220), 1.5f);
-    dl->AddCircle(ImVec2(cx, cy), 2.0f, IM_COL32(0, 0, 0, 220), 10, 1.0f);
+    const ImU32 col = IM_COL32(0x4C, 0xE0, 0xD9, 230);
+    dl->AddLine(ImVec2(cx - 7, cy), ImVec2(cx - 2, cy), col, 1.4f);
+    dl->AddLine(ImVec2(cx + 2, cy), ImVec2(cx + 7, cy), col, 1.4f);
+    dl->AddLine(ImVec2(cx, cy - 7), ImVec2(cx, cy - 2), col, 1.4f);
+    dl->AddLine(ImVec2(cx, cy + 2), ImVec2(cx, cy + 7), col, 1.4f);
+    dl->AddCircleFilled(ImVec2(cx, cy), 1.5f, col, 10);
 }
 
 void DrawWatermark(ImDrawList* dl) {
-    DrawShadowText(dl, ImVec2(12, 10), IM_COL32(255, 80, 80, 255), "loko loko external");
-    DrawShadowText(dl, ImVec2(12, 26), IM_COL32(210, 210, 210, 200), "INS menu / END quit");
+    const ImU32 accent = IM_COL32(0x4C, 0xE0, 0xD9, 255);
+    const ImU32 accH   = IM_COL32(0x7C, 0xF7, 0xF0, 255);
+    const ImU32 textLo = IM_COL32(0x82, 0x8C, 0x9B, 255);
+    const ImU32 panel  = IM_COL32(0x14, 0x17, 0x1D, 210);
+    const ImU32 border = IM_COL32(0x2A, 0x31, 0x3D, 255);
+
+    float x = 14.0f, y = 14.0f, w = 190.0f, h = 42.0f;
+    dl->AddRectFilled(ImVec2(x, y),         ImVec2(x + w, y + h), panel,  8.0f);
+    dl->AddRect      (ImVec2(x, y),         ImVec2(x + w, y + h), border, 8.0f, 0, 1.0f);
+    dl->AddRectFilled(ImVec2(x + 2, y + h - 2), ImVec2(x + w - 2, y + h), accent, 2.0f);
+    dl->AddCircleFilled(ImVec2(x + 14, y + h * 0.5f), 4.0f, accent, 12);
+    dl->AddCircle      (ImVec2(x + 14, y + h * 0.5f), 7.0f, IM_COL32(0x32, 0xAF, 0xAA, 255), 24, 1.5f);
+    dl->AddText(ImVec2(x + 28, y + 8),  IM_COL32(0xE6, 0xEA, 0xF0, 255), "loko");
+    dl->AddText(ImVec2(x + 28 + 36, y + 8),  accH,  ".gg");
+    dl->AddText(ImVec2(x + 28, y + 24), textLo, "external // rob run");
 }
 
 } // namespace

@@ -6,28 +6,34 @@
 #include "console.h"
 
 #include "../imgui/imgui.h"
+#include "../imgui/imgui_internal.h"
 #include <cstdio>
 #include <cstdint>
+#include <vector>
 
 namespace {
 
 bool g_open = false;
+int  g_section = 0;
 
 struct SavedBlob {
     uint32_t magic = 0x4B4F4C52; // 'RLOK'
-    uint32_t version = 1;
+    uint32_t version = 2;
     ESP::Settings    esp;
     Aimbot::Settings aim;
 };
 
-void BeginCard(const char* title) {
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.09f, 0.03f, 0.03f, 0.95f));
-    ImGui::BeginChild(title, ImVec2(0, 0), true,
-                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_AlwaysAutoResize);
-    ImGui::TextColored(ImVec4(0.95f, 0.30f, 0.30f, 1.00f), "%s", title);
-    ImGui::Separator();
-}
-void EndCard() { ImGui::EndChild(); ImGui::PopStyleColor(); }
+// ------------------------------------------------------------------
+// Klar palette + helpers
+// ------------------------------------------------------------------
+constexpr ImU32 kAccent    = IM_COL32(0x4C, 0xE0, 0xD9, 0xFF);
+constexpr ImU32 kAccentDim = IM_COL32(0x32, 0xAF, 0xAA, 0xFF);
+constexpr ImU32 kAccentHi  = IM_COL32(0x7C, 0xF7, 0xF0, 0xFF);
+constexpr ImU32 kPanel     = IM_COL32(0x14, 0x17, 0x1D, 0xFF);
+constexpr ImU32 kPanelHi   = IM_COL32(0x1A, 0x1F, 0x27, 0xFF);
+constexpr ImU32 kBorder    = IM_COL32(0x2A, 0x31, 0x3D, 0xFF);
+constexpr ImU32 kTextHi    = IM_COL32(0xE6, 0xEA, 0xF0, 0xFF);
+constexpr ImU32 kTextLo    = IM_COL32(0x82, 0x8C, 0x9B, 0xFF);
 
 uint32_t ColorFromImVec(ImVec4 c) {
     auto cl = [](float v) { return (uint32_t)(v * 255.0f) & 0xFF; };
@@ -41,20 +47,118 @@ ImVec4 ImVecFromColor(uint32_t c) {
     return ImVec4(r, g, b, a);
 }
 
-void TabAim() {
+// ------------------------------------------------------------------
+// Primitives — card header, rail button, section title
+// ------------------------------------------------------------------
+void SectionTitle(const char* big, const char* sub = nullptr) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    dl->AddRectFilled(ImVec2(p.x, p.y + 2), ImVec2(p.x + 3, p.y + 20), kAccent, 2.0f);
+    ImGui::Dummy(ImVec2(10, 0));
+    ImGui::SameLine();
+    ImGui::PushFont(ImGui::GetFont());
+    ImGui::TextUnformatted(big);
+    ImGui::PopFont();
+    if (sub) {
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(kTextLo));
+        ImGui::TextUnformatted(sub);
+        ImGui::PopStyleColor();
+    }
+    ImGui::Dummy(ImVec2(0, 6));
+}
+
+void BeginCard(const char* title) {
+    ImGui::PushStyleColor(ImGuiCol_ChildBg,  ImGui::ColorConvertU32ToFloat4(kPanel));
+    ImGui::PushStyleColor(ImGuiCol_Border,   ImGui::ColorConvertU32ToFloat4(kBorder));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14, 14));
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 8.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
+    ImGui::BeginChild(title, ImVec2(0, 0), true,
+        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_AlwaysAutoResize);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    dl->AddRectFilled(ImVec2(p.x, p.y), ImVec2(p.x + 3, p.y + 16), kAccent, 2.0f);
+    ImGui::Dummy(ImVec2(8, 0));
+    ImGui::SameLine();
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(kTextHi));
+    ImGui::TextUnformatted(title);
+    ImGui::PopStyleColor();
+    ImGui::Separator();
+    ImGui::Dummy(ImVec2(0, 4));
+}
+void EndCard() {
+    ImGui::EndChild();
+    ImGui::PopStyleVar(3);
+    ImGui::PopStyleColor(2);
+    ImGui::Dummy(ImVec2(0, 4));
+}
+
+bool RailButton(const char* glyph, const char* label, bool active, int height = 52) {
+    ImGuiWindow* win = ImGui::GetCurrentWindow();
+    ImDrawList* dl = win->DrawList;
+
+    ImVec2 pos  = ImGui::GetCursorScreenPos();
+    float  w    = ImGui::GetContentRegionAvail().x;
+    ImVec2 size(w, (float)height);
+    ImRect bb(pos, ImVec2(pos.x + size.x, pos.y + size.y));
+    ImGuiID id = win->GetID(label);
+    bool hovered = false, held = false;
+    bool pressed = ImGui::ButtonBehavior(bb, id, &hovered, &held);
+    ImGui::ItemSize(size);
+    ImGui::ItemAdd(bb, id);
+
+    ImU32 bg = active ? IM_COL32(26, 46, 50, 255)
+              : hovered ? IM_COL32(26, 31, 39, 255)
+              : IM_COL32(0, 0, 0, 0);
+    dl->AddRectFilled(bb.Min, bb.Max, bg, 8.0f);
+    if (active)
+        dl->AddRectFilled(ImVec2(bb.Min.x + 4, bb.Min.y + 10),
+                          ImVec2(bb.Min.x + 7, bb.Max.y - 10),
+                          kAccent, 2.0f);
+
+    ImU32 textCol = active ? kAccentHi : (hovered ? kTextHi : kTextLo);
+    ImVec2 glyphSz = ImGui::CalcTextSize(glyph);
+    ImVec2 labelSz = ImGui::CalcTextSize(label);
+    dl->AddText(ImVec2(bb.Min.x + 20, bb.Min.y + (size.y - glyphSz.y - labelSz.y - 2) * 0.5f),
+                textCol, glyph);
+    dl->AddText(ImVec2(bb.Min.x + 20 + glyphSz.x + 10,
+                       bb.Min.y + (size.y - labelSz.y) * 0.5f),
+                textCol, label);
+    return pressed;
+}
+
+bool AccentButton(const char* label) {
+    ImGui::PushStyleColor(ImGuiCol_Button,        ImGui::ColorConvertU32ToFloat4(IM_COL32(32, 72, 70, 255)));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::ColorConvertU32ToFloat4(IM_COL32(50, 110, 105, 255)));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImGui::ColorConvertU32ToFloat4(kAccentDim));
+    ImGui::PushStyleColor(ImGuiCol_Text,          ImGui::ColorConvertU32ToFloat4(kAccentHi));
+    bool r = ImGui::Button(label);
+    ImGui::PopStyleColor(4);
+    return r;
+}
+
+void StatRow(const char* k, const char* v) {
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(kTextLo));
+    ImGui::Text("%s", k);
+    ImGui::PopStyleColor();
+    ImGui::SameLine(140);
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(kTextHi));
+    ImGui::Text("%s", v);
+    ImGui::PopStyleColor();
+}
+
+// ------------------------------------------------------------------
+// Sections
+// ------------------------------------------------------------------
+void SecAim() {
+    SectionTitle("Aim", "// trigger / bone / fov");
     auto& a = Aimbot::Cfg();
-    BeginCard("Aimbot");
-    ImGui::Checkbox("Enable",        &a.enabled);
-    ImGui::Checkbox("Sticky target", &a.sticky);
-    ImGui::Checkbox("Ignore dead",   &a.ignoreDead);
-    ImGui::Checkbox("Draw FOV",      &a.drawFov);
-    ImGui::Checkbox("Lead prediction",&a.predict);
-    ImGui::Checkbox("Memory aim",    &a.memoryAim);
-    ImGui::Checkbox("Recoil compensation", &a.recoilComp);
-    ImGui::SliderFloat("FOV (px)",   &a.fov,         20.0f, 600.0f, "%.0f");
-    ImGui::SliderFloat("Smoothing",  &a.smooth,      1.0f,  20.0f);
-    ImGui::SliderFloat("Max dist",   &a.maxDistance, 10.0f, 500.0f);
-    ImGui::SliderFloat("Bullet speed",&a.bulletSpeed,50.0f,1500.0f);
+    BeginCard("TARGET");
+    ImGui::Checkbox("Enable",             &a.enabled);
+    ImGui::Checkbox("Sticky target",      &a.sticky);
+    ImGui::Checkbox("Ignore dead",        &a.ignoreDead);
+    ImGui::Checkbox("Draw FOV",           &a.drawFov);
     const char* bones[] = { "Head", "Torso", "Legs", "Nearest" };
     int bi = (int)a.bone;
     if (ImGui::Combo("Bone", &bi, bones, 4)) a.bone = (Aimbot::Bone)bi;
@@ -62,111 +166,216 @@ void TabAim() {
     int pi = (int)a.priority;
     if (ImGui::Combo("Priority", &pi, prios, 2)) a.priority = (Aimbot::Priority)pi;
     EndCard();
-}
 
-void TabVisuals() {
-    auto& c = ESP::Cfg();
-    BeginCard("Visuals");
-    ImGui::Checkbox("ESP master",    &c.enabled);
-    ImGui::Checkbox("Show dead",     &c.showDead);
-    ImGui::Checkbox("Show offscreen",&c.showOffscreen);
-    ImGui::SliderFloat("Max dist",   &c.maxDistance, 10.0f, 1000.0f);
-    ImGui::SliderFloat("Box scale",  &c.boxScale, 0.3f, 2.0f);
-    ImGui::Separator();
-    ImGui::Checkbox("Box",           &c.box);
-    ImGui::Checkbox("Corner box",    &c.cornerBox);
-    ImGui::Checkbox("Snapline",      &c.snapline);
-    ImGui::Checkbox("Health bar",    &c.healthBar);
-    ImGui::Checkbox("Name",          &c.nameTag);
-    ImGui::Checkbox("Distance",      &c.distanceTag);
-    ImGui::Checkbox("Role",          &c.roleTag);
-    ImGui::Checkbox("Held item",     &c.heldItemTag);
-    ImGui::Checkbox("Armor",         &c.armorTag);
-    ImGui::Checkbox("Clan",          &c.clanTag);
-    ImGui::Checkbox("Portrait",      &c.portrait);
-    ImGui::Checkbox("Head dot",      &c.headDot);
-    ImGui::Checkbox("Skeleton",      &c.skeleton);
-    ImGui::Checkbox("Chams wire",    &c.chamsWire);
-    ImGui::Checkbox("Crosshair",     &c.crosshair);
-    ImGui::Checkbox("Watermark",     &c.watermark);
+    BeginCard("RESPONSE");
+    ImGui::SliderFloat("FOV (px)",        &a.fov,          20.0f, 600.0f, "%.0f");
+    ImGui::SliderFloat("Smoothing",       &a.smooth,       1.0f,  20.0f);
+    ImGui::SliderFloat("Max distance",    &a.maxDistance,  10.0f, 500.0f);
+    EndCard();
+
+    BeginCard("PREDICTION");
+    ImGui::Checkbox("Lead prediction",    &a.predict);
+    ImGui::SliderFloat("Bullet speed",    &a.bulletSpeed,  50.0f, 1500.0f);
+    EndCard();
+
+    BeginCard("RIG MODES");
+    ImGui::Checkbox("Memory aim (writes camera basis)", &a.memoryAim);
+    ImGui::Checkbox("Recoil compensation",              &a.recoilComp);
     EndCard();
 }
 
-void TabPlayers() {
-    BeginCard("Players");
+void SecVisuals() {
+    SectionTitle("Visuals", "// box / name / radar");
+    auto& c = ESP::Cfg();
+    BeginCard("MASTER");
+    ImGui::Checkbox("ESP master",         &c.enabled);
+    ImGui::Checkbox("Show dead",          &c.showDead);
+    ImGui::Checkbox("Show offscreen",     &c.showOffscreen);
+    ImGui::SliderFloat("Max distance",    &c.maxDistance, 10.0f, 1000.0f);
+    ImGui::SliderFloat("Box scale",       &c.boxScale, 0.3f, 2.0f);
+    EndCard();
+
+    BeginCard("BOX & LABELS");
+    ImGui::Checkbox("Box",                &c.box);
+    ImGui::Checkbox("Corner box",         &c.cornerBox);
+    ImGui::Checkbox("Snapline",           &c.snapline);
+    ImGui::Checkbox("Health bar",         &c.healthBar);
+    ImGui::Checkbox("Name tag",           &c.nameTag);
+    ImGui::Checkbox("Distance tag",       &c.distanceTag);
+    ImGui::Checkbox("Role tag",           &c.roleTag);
+    ImGui::Checkbox("Held item",          &c.heldItemTag);
+    ImGui::Checkbox("Armor tag",          &c.armorTag);
+    ImGui::Checkbox("Clan tag",           &c.clanTag);
+    EndCard();
+
+    BeginCard("BODY");
+    ImGui::Checkbox("Portrait",           &c.portrait);
+    ImGui::Checkbox("Head dot",           &c.headDot);
+    ImGui::Checkbox("Skeleton",           &c.skeleton);
+    ImGui::Checkbox("Chams wire",         &c.chamsWire);
+    EndCard();
+
+    BeginCard("HUD");
+    ImGui::Checkbox("Crosshair",          &c.crosshair);
+    ImGui::Checkbox("Watermark",          &c.watermark);
+    ImGui::Checkbox("Radar",              &c.radar);
+    ImGui::Checkbox("Radar loot",         &c.radarLoot);
+    ImGui::SliderFloat("Radar size",      &c.radarSize, 100.0f, 400.0f);
+    ImGui::SliderFloat("Radar range",     &c.radarRange, 50.0f, 800.0f);
+    EndCard();
+}
+
+void SecPlayers() {
+    SectionTitle("Players", "// live roster");
+    BeginCard("ROSTER");
     std::vector<Player> players;
     Game::SnapshotPlayers(players);
+    if (players.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(kTextLo));
+        ImGui::TextUnformatted("no entities yet — waiting on root discovery...");
+        ImGui::PopStyleColor();
+    }
     for (auto& p : players) {
-        if (p.isLocalPlayer) {
-            ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "YOU  %s  hp=%d",
-                               p.name.c_str(), p.health);
-            continue;
-        }
         ImGui::PushID((int)p.entityId);
-        ImGui::Text("%-18s  hp=%-3d  d=%4dm  %s",
-                    p.name.c_str(), p.health, (int)p.distance,
+        ImU32 pill = p.isLocalPlayer ? kAccent : (p.alive ? IM_COL32(230, 90, 100, 255)
+                                                           : IM_COL32(110, 120, 135, 255));
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImVec2 cp = ImGui::GetCursorScreenPos();
+        dl->AddRectFilled(ImVec2(cp.x, cp.y + 4), ImVec2(cp.x + 4, cp.y + 20), pill, 2.0f);
+        ImGui::Dummy(ImVec2(10, 0));
+        ImGui::SameLine();
+        ImGui::Text("%-18s", p.name.empty() ? "unknown" : p.name.c_str());
+        ImGui::SameLine(200);
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(kTextLo));
+        ImGui::Text("hp %-3d  %4dm  %s", p.health, (int)p.distance,
                     p.role.empty() ? "" : p.role.c_str());
-        ImGui::SameLine();
-        if (ImGui::SmallButton("TP to"))  Game::BeginTeleport(Game::TpKind::ToEntity, p.entityId, p.root);
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Pull"))   Game::BeginTeleport(Game::TpKind::PullEntity, p.entityId, p.root);
+        ImGui::PopStyleColor();
+        if (!p.isLocalPlayer) {
+            ImGui::SameLine(410);
+            if (ImGui::SmallButton("TP"))   Game::BeginTeleport(Game::TpKind::ToEntity,   p.entityId, p.root);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Pull")) Game::BeginTeleport(Game::TpKind::PullEntity, p.entityId, p.root);
+        }
         ImGui::PopID();
     }
-    if (ImGui::Button("Cancel teleport")) Game::CancelTeleport();
+    ImGui::Separator();
+    if (AccentButton("Cancel teleport")) Game::CancelTeleport();
     EndCard();
 }
 
-void TabMisc() {
-    BeginCard("Misc");
+void SecWorld() {
+    SectionTitle("World", "// loot / vehicles / doors");
+    auto& c = ESP::Cfg();
+    BeginCard("LOOT ESP");
+    ImGui::Checkbox("Enabled",            &c.lootEsp);
+    ImGui::SliderInt("Min rarity",        &c.lootMinRarity, 0, 6);
+    ImGui::SliderFloat("Max distance",    &c.lootMaxDistance, 10.0f, 500.0f);
+    EndCard();
+
+    BeginCard("WORLD MARKS");
+    ImGui::Checkbox("Vehicle ESP",        &c.vehicleEsp);
+    ImGui::Checkbox("Door ESP",           &c.doorEsp);
+    EndCard();
+}
+
+void SecMisc() {
+    SectionTitle("Misc", "// fly / gun / probe");
+    BeginCard("MOVEMENT");
     static bool fly = false;
     if (ImGui::Checkbox("Fly mode", &fly)) {
         if (fly) {
-            Cam c = Game::Camera();
-            Game::BeginTeleport(Game::TpKind::ToPoint, 0, c.pos, true);
+            Cam cam = Game::Camera();
+            Game::BeginTeleport(Game::TpKind::ToPoint, 0, cam.pos, true);
         } else {
             Game::CancelTeleport();
         }
     }
+    EndCard();
+
+    BeginCard("GUN MODS");
     static Game::GunToggles gun;
-    bool changed = false;
-    changed |= ImGui::Checkbox("No recoil", &gun.noRecoil);
-    changed |= ImGui::Checkbox("No spread", &gun.noSpread);
-    changed |= ImGui::Checkbox("No sway",   &gun.noSway);
-    if (changed) Game::ApplyGun(gun);
-    ImGui::Text("Camera FOV: %.1f", Game::Camera().fov);
-    ImGui::Text("Screen: %dx%d", Overlay::Width(), Overlay::Height());
+    bool ch = false;
+    ch |= ImGui::Checkbox("No recoil",  &gun.noRecoil);
+    ch |= ImGui::Checkbox("No spread",  &gun.noSpread);
+    ch |= ImGui::Checkbox("No sway",    &gun.noSway);
+    if (ch) Game::ApplyGun(gun);
+    EndCard();
+
+    BeginCard("PROBE");
+    char buf[48];
+    std::snprintf(buf, 48, "%.1f deg", Game::Camera().fov);
+    StatRow("Camera FOV",   buf);
+    std::snprintf(buf, 48, "%dx%d", Overlay::Width(), Overlay::Height());
+    StatRow("Screen",       buf);
+    Cam c = Game::Camera();
+    std::snprintf(buf, 48, c.valid ? "ok" : "no camera");
+    StatRow("Status",       buf);
     EndCard();
 }
 
-void TabSettings() {
-    auto& c = ESP::Cfg();
-    BeginCard("Settings");
-    if (ImGui::Button("Save config")) Menu::SaveConfig();
+void SecSettings() {
+    SectionTitle("Config", "// save / palette");
+    BeginCard("CONFIG FILE");
+    if (AccentButton("Save config")) Menu::SaveConfig();
     ImGui::SameLine();
-    if (ImGui::Button("Load config")) Menu::LoadConfig();
-    ImGui::Separator();
-    auto colorPick = [](const char* label, uint32_t& c) {
-        ImVec4 v = ImVecFromColor(c);
-        if (ImGui::ColorEdit4(label, (float*)&v, ImGuiColorEditFlags_NoInputs))
-            c = ColorFromImVec(v);
+    if (AccentButton("Load config")) Menu::LoadConfig();
+    EndCard();
+
+    auto& c = ESP::Cfg();
+    BeginCard("PALETTE");
+    auto colorPick = [](const char* label, uint32_t& v) {
+        ImVec4 iv = ImVecFromColor(v);
+        if (ImGui::ColorEdit4(label, (float*)&iv, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar))
+            v = ColorFromImVec(iv);
     };
     colorPick("Enemy",   c.colorEnemy);
     colorPick("Ally",    c.colorAlly);
     colorPick("Dead",    c.colorDead);
     colorPick("OwnTeam", c.colorOwnTeam);
     colorPick("Text",    c.colorText);
-    ImGui::Separator();
-    ImGui::Checkbox("Radar",           &c.radar);
-    ImGui::Checkbox("Radar loot",      &c.radarLoot);
-    ImGui::SliderFloat("Radar size",   &c.radarSize, 100.0f, 400.0f);
-    ImGui::SliderFloat("Radar range",  &c.radarRange,50.0f,  800.0f);
-    ImGui::Separator();
-    ImGui::Checkbox("Loot ESP",        &c.lootEsp);
-    ImGui::SliderInt("Loot min rarity",&c.lootMinRarity, 0, 6);
-    ImGui::SliderFloat("Loot max dist",&c.lootMaxDistance, 10.0f, 500.0f);
-    ImGui::Checkbox("Vehicle ESP",     &c.vehicleEsp);
-    ImGui::Checkbox("Door ESP",        &c.doorEsp);
     EndCard();
+}
+
+// ------------------------------------------------------------------
+// Frame
+// ------------------------------------------------------------------
+struct Section { const char* glyph; const char* label; void (*draw)(); };
+static const Section kSections[] = {
+    { "[a]", "Aim",      SecAim      },
+    { "[v]", "Visuals",  SecVisuals  },
+    { "[p]", "Players",  SecPlayers  },
+    { "[w]", "World",    SecWorld    },
+    { "[m]", "Misc",     SecMisc     },
+    { "[c]", "Config",   SecSettings },
+};
+
+void DrawTitleBar() {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    float w = ImGui::GetContentRegionAvail().x;
+    dl->AddRectFilled(ImVec2(p.x, p.y), ImVec2(p.x + w, p.y + 46), kPanelHi, 10.0f);
+    dl->AddRectFilled(ImVec2(p.x, p.y + 44), ImVec2(p.x + w, p.y + 46),
+                      kAccent, 0.0f);
+    // brand dot
+    dl->AddCircleFilled(ImVec2(p.x + 22, p.y + 23), 5.0f, kAccent, 12);
+    dl->AddCircle      (ImVec2(p.x + 22, p.y + 23), 8.0f, kAccentDim, 24, 1.5f);
+    dl->AddText(ImVec2(p.x + 42, p.y + 10), kTextHi, "loko");
+    dl->AddText(ImVec2(p.x + 42 + 36, p.y + 10), kAccent, ".gg");
+    dl->AddText(ImVec2(p.x + 42, p.y + 27), kTextLo, "external // rob run");
+    char buf[48];
+    Cam c = Game::Camera();
+    std::snprintf(buf, 48, c.valid ? "connected" : "linking...");
+    ImVec2 sz = ImGui::CalcTextSize(buf);
+    dl->AddRectFilled(ImVec2(p.x + w - sz.x - 24, p.y + 14),
+                      ImVec2(p.x + w - 12,         p.y + 32),
+                      c.valid ? IM_COL32(32, 72, 70, 255) : IM_COL32(60, 44, 50, 255),
+                      5.0f);
+    dl->AddCircleFilled(ImVec2(p.x + w - sz.x - 18, p.y + 23), 3.0f,
+                        c.valid ? kAccent : IM_COL32(230, 90, 100, 255), 12);
+    dl->AddText(ImVec2(p.x + w - sz.x - 10, p.y + 16),
+                c.valid ? kAccentHi : IM_COL32(230, 90, 100, 255), buf);
+    ImGui::Dummy(ImVec2(w, 46));
+    ImGui::Dummy(ImVec2(0, 6));
 }
 
 } // namespace
@@ -182,20 +391,52 @@ bool Menu::IsOpen() { return g_open; }
 
 void Menu::Render() {
     if (!g_open) return;
-    ImGui::SetNextWindowSize(ImVec2(520, 560), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowPos (ImVec2(120, 120), ImGuiCond_FirstUseEver);
-    if (ImGui::Begin("loko loko", &g_open, ImGuiWindowFlags_NoCollapse)) {
-        if (ImGui::BeginTabBar("tabs")) {
-            if (ImGui::BeginTabItem("Aimbot"))   { TabAim();     ImGui::EndTabItem(); }
-            if (ImGui::BeginTabItem("Visuals"))  { TabVisuals(); ImGui::EndTabItem(); }
-            if (ImGui::BeginTabItem("Players"))  { TabPlayers(); ImGui::EndTabItem(); }
-            if (ImGui::BeginTabItem("Misc"))     { TabMisc();    ImGui::EndTabItem(); }
-            if (ImGui::BeginTabItem("Settings")) { TabSettings();ImGui::EndTabItem(); }
-            ImGui::EndTabBar();
+    ImGui::SetNextWindowSize(ImVec2(760, 540), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos (ImVec2(140, 110), ImGuiCond_FirstUseEver);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14, 14));
+    if (ImGui::Begin("loko.gg", &g_open,
+        ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar))
+    {
+        DrawTitleBar();
+
+        // Left rail
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::ColorConvertU32ToFloat4(kPanel));
+        ImGui::PushStyleColor(ImGuiCol_Border,  ImGui::ColorConvertU32ToFloat4(kBorder));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 10));
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 10.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
+        ImGui::BeginChild("rail", ImVec2(170, 0), true,
+            ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        for (int i = 0; i < (int)(sizeof(kSections)/sizeof(kSections[0])); ++i) {
+            if (RailButton(kSections[i].glyph, kSections[i].label, g_section == i))
+                g_section = i;
         }
+        // footer: hotkey hint
+        ImGui::Dummy(ImVec2(0, 8));
+        ImGui::Separator();
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(kTextLo));
+        ImGui::TextWrapped("INS   toggle\nEND   quit");
+        ImGui::PopStyleColor();
+        ImGui::EndChild();
+        ImGui::PopStyleVar(3);
+        ImGui::PopStyleColor(2);
+
+        ImGui::SameLine();
+
+        // Right content
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::ColorConvertU32ToFloat4(IM_COL32(15, 17, 21, 255)));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14, 10));
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 10.0f);
+        ImGui::BeginChild("content", ImVec2(0, 0), false);
+        if (g_section >= 0 && g_section < (int)(sizeof(kSections)/sizeof(kSections[0])))
+            kSections[g_section].draw();
+        ImGui::EndChild();
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor();
     }
     ImGui::End();
-    // click-through follows what ImGui is actually under
+    ImGui::PopStyleVar();
+
     Overlay::SetClickThrough(!ImGui::GetIO().WantCaptureMouse);
 }
 
@@ -216,7 +457,7 @@ void Menu::LoadConfig() {
     fopen_s(&f, "rob-run.cfg", "rb");
     if (!f) return;
     SavedBlob b;
-    if (std::fread(&b, sizeof(b), 1, f) == 1 && b.magic == 0x4B4F4C52 && b.version == 1) {
+    if (std::fread(&b, sizeof(b), 1, f) == 1 && b.magic == 0x4B4F4C52 && b.version == 2) {
         ESP::Cfg()    = b.esp;
         Aimbot::Cfg() = b.aim;
         Console::Success("config loaded");

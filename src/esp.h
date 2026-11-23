@@ -45,13 +45,13 @@ struct Settings {
     bool  vehicleEsp   = true;
     bool  doorEsp      = false;
 
-    // colors (RGBA)
-    uint32_t colorEnemy   = 0xFFFF4444;
-    uint32_t colorAlly    = 0xFF44FF44;
-    uint32_t colorDead    = 0xFF888888;
-    uint32_t colorOwnTeam = 0xFF44AAFF;
-    uint32_t colorText    = 0xFFFFFFFF;
-    uint32_t colorShadow  = 0xFF000000;
+    // colors (ABGR as little-endian 0xAARRGGBB where stored)
+    uint32_t colorEnemy   = 0xFF4CE0D9;  // klar cyan — enemies
+    uint32_t colorAlly    = 0xFF55E39A;  // mint — allies
+    uint32_t colorDead    = 0xFF6A7482;  // slate
+    uint32_t colorOwnTeam = 0xFF7CF7F0;  // bright cyan
+    uint32_t colorText    = 0xFFE6EAF0;  // off-white
+    uint32_t colorShadow  = 0xFF0F1115;  // near-black
 };
 
 Settings& Cfg();
